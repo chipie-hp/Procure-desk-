@@ -31,6 +31,65 @@ const GS = () => (
     .fade-up { animation: fadeUp 0.3s ease both; }
     @keyframes spin { to { transform: rotate(360deg); } }
     .spin { animation: spin 0.8s linear infinite; }
+    @keyframes slideIn { from { transform:translateX(-100%); } to { transform:translateX(0); } }
+    @keyframes slideOut { from { transform:translateX(0); } to { transform:translateX(-100%); } }
+
+    /* ── Mobile bottom nav ── */
+    .mobile-bottom-nav {
+      display: none;
+      position: fixed; bottom: 0; left: 0; right: 0; z-index: 200;
+      background: #07111f; border-top: 1px solid #162840;
+      padding: 6px 0 env(safe-area-inset-bottom, 6px);
+    }
+    .mob-nav-item {
+      display: flex; flex-direction: column; align-items: center; gap: 2px;
+      padding: 6px 4px; border-radius: 10px; cursor: pointer;
+      flex: 1; min-width: 0; border: none; background: transparent;
+      color: #3a5a78; font-family: inherit; transition: color 0.15s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .mob-nav-item.active { color: #0fb8a4; }
+    .mob-nav-icon { font-size: 18px; line-height: 1; }
+    .mob-nav-label { font-size: 9px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 50px; }
+
+    /* ── Sidebar overlay on mobile ── */
+    .sidebar-overlay {
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+      z-index: 150; backdrop-filter: blur(2px);
+    }
+
+    @media (max-width: 768px) {
+      .desktop-sidebar { display: none !important; }
+      .mobile-bottom-nav { display: flex !important; }
+      .sidebar-overlay { display: block; }
+      .main-content-area { padding: 14px 14px 80px !important; }
+      .mobile-header {
+        display: flex !important; position: sticky; top: 0; z-index: 100;
+        background: #07111fee; backdrop-filter: blur(12px);
+        border-bottom: 1px solid #162840; padding: 10px 14px;
+        align-items: center; justify-content: space-between; gap: 10px;
+        margin: -14px -14px 16px;
+      }
+    }
+    @media (min-width: 769px) {
+      .mobile-header { display: none !important; }
+      .sidebar-overlay { display: none !important; }
+    }
+
+    /* ── Catalog card grid (landing) ── */
+    .catalog-card-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 14px;
+    }
+    @media (max-width: 600px) {
+      .catalog-card-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+    }
+
+    /* ── Touch-friendly inputs on mobile ── */
+    @media (max-width: 768px) {
+      input, select, textarea { font-size: 16px !important; }
+    }
   `}</style>
 );
 
@@ -365,30 +424,33 @@ function Purchases({ purchases, setPurchases, vendors, modalOpen, setModalOpen, 
   const [delId,     setDelId]    = useState(null);
   const [dupModal,  setDupModal] = useState(null); // { existing, newEntry }
   const [adding,    setAdding]   = useState(false);
+  const [marketData, setMarketData] = useState([]); // global market prices for suggestions
 
-  /* ── item autofill history — includes catalogItems ── */
-  const history = useMemo(()=>{
-    const m={};
-    // First load from purchases
-    purchases.forEach(p=>{ m[p.item.toLowerCase()]={ price:p.price, category:p.category, item:p.item, vendor:p.vendor }; });
-    // Override/add from catalog items (manually curated entries take priority)
-    catalogItems.forEach(c=>{ m[c.item.toLowerCase()]={ price:c.price, category:c.category, item:c.item, vendor:c.vendor }; });
-    return m;
-  },[purchases, catalogItems]);
+  // Fetch market data once for global item suggestions
+  useEffect(()=>{
+    supabase.from("purchases").select("item,vendor,category,price,date").order("date",{ascending:false}).limit(2000)
+      .then(({data})=>{ if(data) setMarketData(data.map(r=>({...r,price:Number(r.price)}))); });
+  },[]);
 
-  /* ── vendor-to-items map: which vendors sell which items (from purchases + catalog) ── */
+  /* ── Build combined item→vendor price map from: user's purchases + catalog + market ── */
   const itemVendorMap = useMemo(()=>{
-    // key: item name (lowercase) → Set of vendor names
     const m={};
-    const add = (item, vendor, price, category) => {
+    const add = (item, vendor, price, category, date="") => {
       const k = item.toLowerCase().trim();
-      if (!m[k]) m[k] = {};
-      m[k][vendor] = { vendor, price: Number(price), category };
+      if (!m[k]) m[k] = { item, category, vendors:{} };
+      // keep latest price per vendor
+      if (!m[k].vendors[vendor] || date > (m[k].vendors[vendor].date||"")) {
+        m[k].vendors[vendor] = { price: Number(price), date, category };
+      }
     };
-    purchases.forEach(p => add(p.item, p.vendor, p.price, p.category));
-    catalogItems.forEach(c => add(c.item, c.vendor, c.price, c.category));
+    // Market data first (lowest priority — overridden by own data)
+    marketData.forEach(p=>add(p.item, p.vendor, p.price, p.category, p.date));
+    // User's catalog items
+    catalogItems.forEach(c=>add(c.item, c.vendor, c.price, c.category, c.date||""));
+    // User's own purchases (highest priority)
+    purchases.forEach(p=>add(p.item, p.vendor, p.price, p.category, p.date));
     return m;
-  }, [purchases, catalogItems]);
+  },[purchases, catalogItems, marketData]);
 
   /* ── vendor list for group-by dropdown ── */
   const vendorNames = useMemo(()=>["none",...new Set(purchases.map(p=>p.vendor)).values()],[purchases]);
@@ -397,16 +459,16 @@ function Purchases({ purchases, setPurchases, vendors, modalOpen, setModalOpen, 
   const filteredVendorsForItem = useMemo(()=>{
     if (!form.item.trim()) return vendors; // no item typed — show all vendors
     const itemKey = form.item.toLowerCase().trim();
-    const vendorMap = itemVendorMap[itemKey];
-    if (!vendorMap || Object.keys(vendorMap).length === 0) return vendors; // unknown item — show all
-    // Return vendors that sell this item, merging with registered vendors list
-    const knownVendorNames = Object.keys(vendorMap);
+    const entry = itemVendorMap[itemKey];
+    if (!entry || Object.keys(entry.vendors).length === 0) return vendors; // unknown item — show all
+    const knownVendorNames = Object.keys(entry.vendors);
+    // Registered vendors who sell this item
     const matched = vendors.filter(v => knownVendorNames.includes(v.name));
-    // Also include unregistered vendors that have sold this item
+    // Also include unregistered vendors from market data
     const registeredNames = new Set(vendors.map(v=>v.name));
     const extra = knownVendorNames
       .filter(n => !registeredNames.has(n))
-      .map(n => ({ id: n, name: n, category: "", contact: "", phone: "", address: "" }));
+      .map(n => ({ id:n, name:n, category:"", contact:"", phone:"", address:"", fromMarket:true }));
     return [...matched, ...extra];
   }, [form.item, vendors, itemVendorMap]);
 
@@ -465,11 +527,11 @@ function Purchases({ purchases, setPurchases, vendors, modalOpen, setModalOpen, 
 
   const selectVendor = (name) => {
     setVendorInput(name);
-    // Auto-fill price based on item+vendor from catalog/history
+    // Auto-fill price based on item+vendor from the combined map
     const itemKey = form.item.toLowerCase().trim();
-    const vendorMap = itemVendorMap[itemKey];
-    const knownPrice = vendorMap?.[name]?.price;
-    const knownCat = vendorMap?.[name]?.category;
+    const entry = itemVendorMap[itemKey];
+    const knownPrice = entry?.vendors?.[name]?.price;
+    const knownCat = entry?.vendors?.[name]?.category;
     setForm(f=>({
       ...f,
       vendor: name,
@@ -496,9 +558,28 @@ function Purchases({ purchases, setPurchases, vendors, modalOpen, setModalOpen, 
   const onItem = v => {
     setForm(f=>({...f, item:capFirst(v), price:"" })); // clear price when item changes
     if (v.length>0) {
-      const itemKey = v.toLowerCase();
-      // Suggestions from history (purchases + catalog)
-      const s = Object.values(history).filter(h=>h.item.toLowerCase().includes(itemKey));
+      const q = v.toLowerCase();
+      // Suggestions from itemVendorMap (user purchases + catalog + market)
+      const matches = Object.values(itemVendorMap).filter(h=>h.item.toLowerCase().includes(q));
+      // Build suggestion list: each unique item with best known price
+      const s = matches.map(h=>{
+        const vendorEntries = Object.entries(h.vendors);
+        // Prefer user's own vendor if selected
+        const currentVendorEntry = form.vendor && h.vendors[form.vendor];
+        const bestEntry = currentVendorEntry
+          ? { vendor:form.vendor, ...currentVendorEntry }
+          : vendorEntries.sort((a,b)=>b[1].date.localeCompare(a[1].date))[0]
+            ? { vendor:vendorEntries[0][0], ...vendorEntries[0][1] }
+            : null;
+        return {
+          item: h.item,
+          category: h.category,
+          price: bestEntry?.price || 0,
+          vendor: bestEntry?.vendor || "",
+          vendorCount: vendorEntries.length,
+          fromMarket: !purchases.some(p=>p.item.toLowerCase()===h.item.toLowerCase()),
+        };
+      });
       setSugs(s); setShowSugs(s.length>0);
     } else {
       setShowSugs(false);
@@ -506,23 +587,23 @@ function Purchases({ purchases, setPurchases, vendors, modalOpen, setModalOpen, 
     // Re-calculate price if vendor already selected
     if (form.vendor) {
       const itemKey = v.toLowerCase().trim();
-      const vendorMap = itemVendorMap[itemKey];
-      const knownPrice = vendorMap?.[form.vendor]?.price;
+      const entry = itemVendorMap[itemKey];
+      const knownPrice = entry?.vendors[form.vendor]?.price;
       if (knownPrice !== undefined) {
         setForm(f=>({...f, item:capFirst(v), price:String(knownPrice)}));
       }
     }
   };
 
-  // Sync vendorInput when form.vendor is set via item autofill suggestion
+  // When suggestion selected
   const onSugSelect = (s) => {
-    // If vendor already selected, use that vendor's known price for this item
     const currentVendor = form.vendor || s.vendor;
     const itemKey = s.item.toLowerCase().trim();
-    const vendorMap = itemVendorMap[itemKey];
-    const knownPrice = vendorMap?.[currentVendor]?.price ?? s.price;
-    setForm(f=>({...f, item:s.item, price:String(knownPrice), category:s.category, vendor:currentVendor}));
-    setVendorInput(currentVendor);
+    const entry = itemVendorMap[itemKey];
+    const knownPrice = entry?.vendors?.[currentVendor]?.price ?? s.price;
+    const knownCat = entry?.vendors?.[currentVendor]?.category || s.category;
+    setForm(f=>({...f, item:s.item, price:String(knownPrice), category:knownCat, vendor:currentVendor}));
+    if (!form.vendor) setVendorInput(currentVendor);
     setShowSugs(false);
   };
 
@@ -780,14 +861,18 @@ function Purchases({ purchases, setPurchases, vendors, modalOpen, setModalOpen, 
                 {sugs.map((s,i)=>(
                   <div key={i} onClick={()=>onSugSelect(s)}
                     style={{padding:"10px 14px",cursor:"pointer",fontSize:12,borderBottom:`1px solid ${T.border}`,
-                      display:"flex",justifyContent:"space-between",color:T.t1}}
+                      display:"flex",justifyContent:"space-between",alignItems:"center",color:T.t1}}
                     onMouseEnter={e=>e.currentTarget.style.background="#0f2236"}
                     onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
-                    <span style={{fontWeight:600}}>{s.item}</span>
-                    <div style={{display:"flex",gap:8,alignItems:"center"}}>
-                      <Badge color={T.purple}>{s.category}</Badge>
-                      <span style={{color:T.teal,fontWeight:700,fontFamily:T.mono,fontSize:11}}>{fmt(s.price)}</span>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontWeight:600,marginBottom:2}}>{s.item}</div>
+                      <div style={{display:"flex",gap:5,alignItems:"center",flexWrap:"wrap"}}>
+                        <Badge color={T.purple} s={{fontSize:9}}>{s.category}</Badge>
+                        {s.vendorCount > 1 && <span style={{fontSize:9,color:T.t3}}>{s.vendorCount} suppliers</span>}
+                        {s.fromMarket && <Badge color={T.amber} s={{fontSize:9}}>🌍 market</Badge>}
+                      </div>
                     </div>
+                    <span style={{color:T.teal,fontWeight:700,fontFamily:T.mono,fontSize:11,flexShrink:0,marginLeft:8}}>{s.price>0?fmt(s.price):"–"}</span>
                   </div>
                 ))}
               </div>
@@ -821,15 +906,15 @@ function Purchases({ purchases, setPurchases, vendors, modalOpen, setModalOpen, 
                           display:"flex",alignItems:"center",gap:8,color:T.t1}}
                         onMouseEnter={e=>e.currentTarget.style.background="#0f2236"}
                         onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
-                        <span style={{fontSize:16}}>🏭</span>
+                        <span style={{fontSize:16}}>{v.fromMarket?"🌍":"🏭"}</span>
                         <div style={{flex:1}}>
                           <div style={{fontWeight:600}}>{v.name}</div>
-                          {v.category&&<div style={{fontSize:10,color:T.t3}}>{v.category}</div>}
+                          <div style={{fontSize:10,color:T.t3}}>{v.fromMarket?"Market supplier":v.category||""}</div>
                         </div>
                         {/* Show known price for this item+vendor */}
-                        {form.item && itemVendorMap[form.item.toLowerCase().trim()]?.[v.name] && (
+                        {form.item && itemVendorMap[form.item.toLowerCase().trim()]?.vendors?.[v.name] && (
                           <span style={{fontSize:11,color:T.teal,fontFamily:T.mono,fontWeight:700,flexShrink:0}}>
-                            {fmt(itemVendorMap[form.item.toLowerCase().trim()][v.name].price)}
+                            {fmt(itemVendorMap[form.item.toLowerCase().trim()].vendors[v.name].price)}
                           </span>
                         )}
                       </div>
@@ -3274,13 +3359,13 @@ function AuthScreen({ onBack, embedded=false }) {
    MARKET CATALOG  (shared read-only price directory — all users)
 ══════════════════════════════════════════════════════════════════════════ */
 function MarketCatalog({ purchases, vendors=[], guestMode=false }) {
-  const [search,      setSearch]   = useState("");
-  const [filterCat,   setFC]       = useState("All");
-  const [filterSupplier, setFS]    = useState("All");
-  const [filterRegion,   setFR]    = useState("All");
-  const [groupBy,     setGroupBy]  = useState("none"); // none | category | supplier | region
-  const [sortBy,      setSortBy]   = useState("item");
-  const [sortDir,     setSortDir]  = useState("asc");
+  const [search,         setSearch]   = useState("");
+  const [filterCat,      setFC]       = useState("All");
+  const [filterSupplier, setFS]       = useState("All");
+  const [sortBy,         setSortBy]   = useState("item");
+  const [sortDir,        setSortDir]  = useState("asc");
+  const [viewMode,       setViewMode] = useState("cards"); // cards | table
+  const [expanded,       setExpanded] = useState(null);
 
   // Build vendor→address map for region lookup
   const vendorRegion = useMemo(()=>{
@@ -3289,180 +3374,272 @@ function MarketCatalog({ purchases, vendors=[], guestMode=false }) {
     return m;
   },[vendors]);
 
-  // Deduplicate — keep latest price per item+vendor
+  // Group by item, collecting all vendor prices
   const catalog = useMemo(()=>{
     const m = {};
     purchases.forEach(p=>{
-      const key = p.item.toLowerCase().trim() + "|" + p.vendor.toLowerCase().trim();
-      if (!m[key] || p.date > m[key].date) {
-        m[key] = { item: p.item, vendor: p.vendor, category: p.category,
-          price: Number(p.price), date: p.date,
-          region: vendorRegion[p.vendor.toLowerCase()] || "" };
+      const key = p.item.toLowerCase().trim();
+      if (!m[key]) {
+        m[key] = {
+          item: p.item, category: p.category,
+          vendors: {}, lowestPrice: Infinity, highestPrice: 0,
+          lastDate: "", region: vendorRegion[p.vendor.toLowerCase()] || "",
+        };
       }
+      const e = m[key];
+      const price = Number(p.price);
+      // keep latest price per vendor
+      if (!e.vendors[p.vendor] || p.date > e.vendors[p.vendor].date) {
+        e.vendors[p.vendor] = { price, date: p.date, region: vendorRegion[p.vendor.toLowerCase()]||"" };
+      }
+      if (price < e.lowestPrice) e.lowestPrice = price;
+      if (price > e.highestPrice) e.highestPrice = price;
+      if (p.date > e.lastDate) { e.lastDate = p.date; }
     });
-    return Object.values(m);
+    return Object.values(m).map(e=>({
+      ...e,
+      vendorList: Object.entries(e.vendors)
+        .map(([name, v])=>({name, price:v.price, date:v.date, region:v.region}))
+        .sort((a,b)=>a.price-b.price),
+      vendorCount: Object.keys(e.vendors).length,
+    }));
   },[purchases, vendorRegion]);
 
   const catOpts      = useMemo(()=>["All",...new Set(catalog.map(c=>c.category)).values()],[catalog]);
-  const supplierOpts = useMemo(()=>["All",...new Set(catalog.map(c=>c.vendor)).values()],[catalog]);
-  const regionOpts   = useMemo(()=>{
-    const r = new Set(catalog.map(c=>c.region).filter(Boolean));
-    return r.size>0 ? ["All",...r.values()] : [];
+  const supplierOpts = useMemo(()=>{
+    const names = new Set();
+    catalog.forEach(c=>Object.keys(c.vendors).forEach(v=>names.add(v)));
+    return ["All",...names];
   },[catalog]);
 
   const filtered = useMemo(()=>{
     let rows = catalog;
     if (search.trim()) {
       const q = search.toLowerCase();
-      rows = rows.filter(r=> r.item.toLowerCase().includes(q) || r.vendor.toLowerCase().includes(q) || r.category.toLowerCase().includes(q) || r.region.toLowerCase().includes(q));
+      rows = rows.filter(r=>
+        r.item.toLowerCase().includes(q) ||
+        r.category.toLowerCase().includes(q) ||
+        Object.keys(r.vendors).some(v=>v.toLowerCase().includes(q))
+      );
     }
     if (filterCat!=="All")      rows = rows.filter(r=>r.category===filterCat);
-    if (filterSupplier!=="All") rows = rows.filter(r=>r.vendor===filterSupplier);
-    if (filterRegion!=="All")   rows = rows.filter(r=>r.region===filterRegion);
+    if (filterSupplier!=="All") rows = rows.filter(r=>r.vendors[filterSupplier]);
     rows = [...rows].sort((a,b)=>{
       let va, vb;
-      if (sortBy==="item")     { va=a.item;    vb=b.item; }
-      if (sortBy==="price")    { va=a.price;   vb=b.price; }
-      if (sortBy==="vendor")   { va=a.vendor;  vb=b.vendor; }
-      if (sortBy==="date")     { va=a.date;    vb=b.date; }
-      if (sortBy==="category") { va=a.category;vb=b.category; }
+      if (sortBy==="item")  { va=a.item;        vb=b.item; }
+      if (sortBy==="price") { va=a.lowestPrice; vb=b.lowestPrice; }
+      if (sortBy==="date")  { va=a.lastDate;    vb=b.lastDate; }
       if (typeof va==="string") return sortDir==="asc"?va.localeCompare(vb):vb.localeCompare(va);
       return sortDir==="asc"?va-vb:vb-va;
     });
     return rows;
-  },[catalog, search, filterCat, filterSupplier, filterRegion, sortBy, sortDir]);
+  },[catalog, search, filterCat, filterSupplier, sortBy, sortDir]);
+
+  const CAT_COLOR = {
+    Foods:T.teal, Beverages:"#6366f1", Cleaning:T.purple,
+    Stationery:T.amber, Electronics:T.green, Other:T.t2,
+  };
 
   const toggleSort = col => {
     if (sortBy===col) setSortDir(d=>d==="asc"?"desc":"asc");
     else { setSortBy(col); setSortDir("asc"); }
   };
-  const SortTh = ({col, children, right}) => (
-    <th onClick={()=>toggleSort(col)} style={{padding:"10px 14px",textAlign:right?"right":"left",
-      background:"#070f1c",color:sortBy===col?T.teal:T.t3,fontWeight:700,fontSize:10,
-      textTransform:"uppercase",letterSpacing:"0.1em",borderBottom:`1px solid ${T.border}`,
-      cursor:"pointer",userSelect:"none",whiteSpace:"nowrap"}}>
-      {children}{sortBy===col?(sortDir==="asc"?" ↑":" ↓"):""}
-    </th>
-  );
 
-  const hasFilters = search||filterCat!=="All"||filterSupplier!=="All"||filterRegion!=="All";
-
-  // Grouped rows
-  const groupedRows = useMemo(()=>{
-    if (groupBy==="none") return null;
-    const key = groupBy==="category"?"category":groupBy==="supplier"?"vendor":"region";
-    const m = {};
-    filtered.forEach(r=>{ const k=r[key]||"Unknown"; if(!m[k]) m[k]=[]; m[k].push(r); });
-    return Object.entries(m).sort((a,b)=>a[0].localeCompare(b[0]));
-  },[filtered, groupBy]);
-
-  const TableRows = ({rows}) => rows.map((r,i)=>(
-    <tr key={i} onMouseEnter={e=>e.currentTarget.style.background="#0f2236"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
-      <td style={{padding:"11px 14px",borderBottom:`1px solid ${T.border}`,fontWeight:600,color:T.t1}}>{r.item}</td>
-      <td style={{padding:"11px 14px",borderBottom:`1px solid ${T.border}`,color:T.t2}}>{r.vendor}</td>
-      <td style={{padding:"11px 14px",borderBottom:`1px solid ${T.border}`}}><Badge color={T.purple} s={{fontSize:10}}>{r.category}</Badge></td>
-      {regionOpts.length>0 && <td style={{padding:"11px 14px",borderBottom:`1px solid ${T.border}`,fontSize:11,color:T.t3}}>{r.region||"—"}</td>}
-      <td style={{padding:"11px 14px",borderBottom:`1px solid ${T.border}`,textAlign:"right",fontWeight:800,color:T.teal,fontFamily:T.mono}}>{fmt(r.price)}</td>
-      <td style={{padding:"11px 14px",borderBottom:`1px solid ${T.border}`,textAlign:"right",fontSize:11,color:T.t3,fontFamily:"monospace"}}>{r.date}</td>
-    </tr>
-  ));
+  const hasFilters = search||filterCat!=="All"||filterSupplier!=="All";
 
   return (
     <div>
       {/* ── Toolbar ── */}
-      <div style={{display:"flex",gap:10,marginBottom:12,flexWrap:"wrap",alignItems:"center"}}>
-        {/* Search */}
+      <div style={{display:"flex",gap:10,marginBottom:14,flexWrap:"wrap",alignItems:"center"}}>
         <div style={{flex:"1 1 200px",position:"relative"}}>
-          <span style={{position:"absolute",left:11,top:"50%",transform:"translateY(-50%)",fontSize:13,color:T.t3,pointerEvents:"none"}}>🔍</span>
-          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search item, vendor, category…"
-            style={{background:"#070f1c",border:`1.5px solid ${search?T.teal:T.border}`,borderRadius:9,
-              padding:"10px 12px 10px 32px",color:T.t1,fontSize:13,outline:"none",width:"100%",transition:"all 0.2s"}}
-            onFocus={e=>e.target.style.borderColor=T.teal} onBlur={e=>e.target.style.borderColor=search?T.teal:T.border}/>
+          <span style={{position:"absolute",left:11,top:"50%",transform:"translateY(-50%)",fontSize:14,color:T.t3,pointerEvents:"none"}}>🔍</span>
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search items, suppliers…"
+            style={{background:"#070f1c",border:`1.5px solid ${search?T.teal:T.border}`,borderRadius:10,
+              padding:"11px 13px 11px 34px",color:T.t1,fontSize:14,outline:"none",width:"100%",transition:"all 0.2s",
+              boxShadow:search?`0 0 0 3px ${T.tealGlow}`:"none"}}
+            onFocus={e=>{e.target.style.borderColor=T.teal;e.target.style.boxShadow=`0 0 0 3px ${T.tealGlow}`;}}
+            onBlur={e=>{e.target.style.borderColor=search?T.teal:T.border;e.target.style.boxShadow=search?`0 0 0 3px ${T.tealGlow}`:"none";}}/>
         </div>
-        {/* Supplier filter */}
         <select value={filterSupplier} onChange={e=>setFS(e.target.value)}
           style={{background:"#070f1c",border:`1.5px solid ${filterSupplier!=="All"?T.teal:T.border}`,borderRadius:9,
-            padding:"10px 12px",color:filterSupplier!=="All"?T.teal:T.t1,fontSize:13,outline:"none",cursor:"pointer",flexShrink:0,maxWidth:160}}>
-          <option value="All" style={{background:"#070f1c",color:T.t1}}>All Suppliers</option>
-          {supplierOpts.filter(o=>o!=="All").map(o=><option key={o} value={o} style={{background:"#070f1c",color:T.t1}}>{o}</option>)}
+            padding:"10px 12px",color:filterSupplier!=="All"?T.teal:T.t1,fontSize:13,outline:"none",cursor:"pointer",flexShrink:0}}>
+          <option value="All" style={{background:"#070f1c"}}>All Suppliers</option>
+          {supplierOpts.filter(o=>o!=="All").map(o=><option key={o} value={o} style={{background:"#070f1c"}}>{o}</option>)}
         </select>
-        {/* Region filter — only show if any regions exist */}
-        {regionOpts.length>0 && (
-          <select value={filterRegion} onChange={e=>setFR(e.target.value)}
-            style={{background:"#070f1c",border:`1.5px solid ${filterRegion!=="All"?T.purple:T.border}`,borderRadius:9,
-              padding:"10px 12px",color:filterRegion!=="All"?T.purple:T.t1,fontSize:13,outline:"none",cursor:"pointer",flexShrink:0,maxWidth:160}}>
-            <option value="All" style={{background:"#070f1c",color:T.t1}}>All Regions</option>
-            {regionOpts.filter(o=>o!=="All").map(o=><option key={o} value={o} style={{background:"#070f1c",color:T.t1}}>{o}</option>)}
-          </select>
-        )}
-        {/* Group by */}
-        <select value={groupBy} onChange={e=>setGroupBy(e.target.value)}
-          style={{background:"#070f1c",border:`1.5px solid ${groupBy!=="none"?T.amber:T.border}`,borderRadius:9,
-            padding:"10px 12px",color:groupBy!=="none"?T.amber:T.t1,fontSize:13,outline:"none",cursor:"pointer",flexShrink:0}}>
-          <option value="none"     style={{background:"#070f1c",color:T.t1}}>No Grouping</option>
-          <option value="category" style={{background:"#070f1c",color:T.t1}}>Group by Category</option>
-          <option value="supplier" style={{background:"#070f1c",color:T.t1}}>Group by Supplier</option>
-          {regionOpts.length>0&&<option value="region" style={{background:"#070f1c",color:T.t1}}>Group by Region</option>}
-        </select>
-        {hasFilters && <button onClick={()=>{setSearch("");setFC("All");setFS("All");setFR("All");}}
+        {/* View toggle */}
+        <div style={{display:"flex",background:"#070f1c",border:`1px solid ${T.border}`,borderRadius:9,overflow:"hidden",flexShrink:0}}>
+          {[["cards","⊞"],["table","☰"]].map(([m,ic])=>(
+            <button key={m} onClick={()=>setViewMode(m)}
+              style={{border:"none",padding:"9px 13px",fontSize:14,cursor:"pointer",transition:"all 0.15s",
+                background:viewMode===m?T.teal:"transparent",color:viewMode===m?"#fff":T.t3}}>{ic}</button>
+          ))}
+        </div>
+        {hasFilters && <button onClick={()=>{setSearch("");setFC("All");setFS("All");}}
           style={{border:`1px solid ${T.border}`,borderRadius:9,padding:"9px 14px",fontSize:12,background:"transparent",color:T.t2,cursor:"pointer"}}>✕ Clear</button>}
-        {!guestMode && <Badge color={T.teal} s={{fontSize:12,padding:"6px 12px",flexShrink:0}}>{filtered.length} prices</Badge>}
       </div>
 
       {/* Category pills */}
-      <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:14}}>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16,overflowX:"auto",paddingBottom:4}}>
         {catOpts.map(cat=>{
           const active=filterCat===cat;
-          const color = active?T.teal:T.t3;
+          const color = CAT_COLOR[cat]||T.teal;
+          const count = cat==="All" ? catalog.length : catalog.filter(r=>r.category===cat).length;
           return (
             <button key={cat} onClick={()=>setFC(cat)}
-              style={{border:`1.5px solid ${active?T.teal:T.border}`,borderRadius:99,padding:"5px 13px",
-                fontSize:12,fontWeight:600,background:active?`${T.teal}18`:"transparent",
-                color,cursor:"pointer",transition:"all 0.15s"}}>
-              {cat} <span style={{fontSize:10,opacity:0.7}}>({cat==="All"?catalog.length:catalog.filter(r=>r.category===cat).length})</span>
+              style={{border:`1.5px solid ${active?color:T.border}`,borderRadius:99,padding:"6px 14px",
+                fontSize:12,fontWeight:600,background:active?`${color}18`:"transparent",
+                color:active?color:T.t3,cursor:"pointer",transition:"all 0.15s",flexShrink:0,
+                display:"flex",alignItems:"center",gap:5}}>
+              {cat!=="All" && (CAT_ICON[cat]||"📦")} {cat}
+              <span style={{background:active?`${color}30`:"#0d1e30",borderRadius:99,padding:"1px 7px",fontSize:10,fontFamily:T.mono}}>{count}</span>
             </button>
           );
         })}
       </div>
 
-      <Card s={{padding:0,overflow:"hidden"}}>
-        <div style={{overflowX:"auto"}}>
-          <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
-            <thead>
-              <tr>
-                <SortTh col="item">Item</SortTh>
-                <SortTh col="vendor">Supplier</SortTh>
-                <SortTh col="category">Category</SortTh>
-                {regionOpts.length>0 && <th style={{padding:"10px 14px",background:"#070f1c",color:T.t3,fontWeight:700,fontSize:10,textTransform:"uppercase",letterSpacing:"0.1em",borderBottom:`1px solid ${T.border}`}}>Region</th>}
-                <SortTh col="price" right>Latest Price</SortTh>
-                <SortTh col="date" right>Last Updated</SortTh>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.length===0 ? (
-                <tr><td colSpan={6} style={{padding:"48px",textAlign:"center",color:T.t3}}>
-                  {purchases.length===0?"No market data yet — be the first to add prices!":"No items match your filters."}
-                </td></tr>
-              ) : groupedRows ? (
-                groupedRows.map(([group, rows])=>(
-                  <>
-                    <tr key={`g-${group}`}>
-                      <td colSpan={6} style={{padding:"10px 14px",background:`${T.cardBg2}`,
-                        borderBottom:`1px solid ${T.border2}`,fontWeight:700,fontSize:12,color:T.t1}}>
-                        <span style={{color:T.amber}}>▸</span> {group}
-                        <span style={{marginLeft:10,fontSize:11,color:T.t3,fontWeight:400}}>{rows.length} item{rows.length!==1?"s":""}</span>
-                      </td>
-                    </tr>
-                    <TableRows rows={rows}/>
-                  </>
-                ))
-              ) : (
-                <TableRows rows={filtered}/>
-              )}
-            </tbody>
-          </table>
+      {/* ── CARD GRID VIEW ── */}
+      {viewMode==="cards" && (
+        <div className="catalog-card-grid">
+          {filtered.length===0 ? (
+            <div style={{gridColumn:"1/-1",textAlign:"center",padding:"60px 20px",color:T.t3}}>
+              <div style={{fontSize:36,marginBottom:12}}>🔍</div>
+              <div style={{fontSize:14,fontWeight:600,color:T.t2,marginBottom:6}}>No items found</div>
+              <div style={{fontSize:12}}>Try different search terms or clear filters</div>
+            </div>
+          ) : filtered.map(c=>{
+            const catColor = CAT_COLOR[c.category]||T.teal;
+            const isOpen = expanded===c.item;
+            const bestPrice = c.vendorList[0];
+            const worstPrice = c.vendorList[c.vendorList.length-1];
+            return (
+              <div key={c.item} onClick={()=>setExpanded(isOpen?null:c.item)}
+                style={{background:T.cardBg,border:`1px solid ${isOpen?catColor:T.border}`,borderRadius:14,
+                  overflow:"hidden",cursor:"pointer",transition:"all 0.18s",
+                  boxShadow:isOpen?`0 4px 20px ${catColor}20`:"none"}}>
+                {/* Card top */}
+                <div style={{padding:"14px 14px 10px",borderTop:`3px solid ${catColor}`}}>
+                  <div style={{display:"flex",alignItems:"flex-start",gap:10,marginBottom:10}}>
+                    <div style={{width:38,height:38,borderRadius:10,background:`${catColor}18`,border:`1px solid ${catColor}30`,
+                      display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>
+                      {CAT_ICON[c.category]||"📦"}
+                    </div>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{fontSize:13,fontWeight:700,color:T.t1,lineHeight:1.3,wordBreak:"break-word"}}>{c.item}</div>
+                      <Badge color={catColor} s={{fontSize:9,marginTop:4,display:"inline-block"}}>{c.category}</Badge>
+                    </div>
+                  </div>
+                  {/* Price range */}
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+                    background:"#070f1c",borderRadius:8,padding:"8px 10px",marginBottom:8}}>
+                    <div>
+                      <div style={{fontSize:9,color:T.t3,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:2}}>Best Price</div>
+                      <div style={{fontSize:15,fontWeight:800,color:T.teal,fontFamily:T.mono}}>{fmt(bestPrice?.price||0)}</div>
+                      {bestPrice && <div style={{fontSize:9,color:T.t3,marginTop:1}}>{bestPrice.name}</div>}
+                    </div>
+                    {c.vendorCount > 1 && (
+                      <div style={{textAlign:"right"}}>
+                        <div style={{fontSize:9,color:T.t3,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.08em",marginBottom:2}}>Highest</div>
+                        <div style={{fontSize:13,fontWeight:600,color:T.amber,fontFamily:T.mono}}>{fmt(worstPrice?.price||0)}</div>
+                        <div style={{fontSize:9,color:T.t3,marginTop:1}}>{worstPrice.name}</div>
+                      </div>
+                    )}
+                  </div>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                    <span style={{fontSize:11,color:T.t3}}>{c.vendorCount} supplier{c.vendorCount!==1?"s":""}</span>
+                    <span style={{fontSize:11,color:T.t3,fontFamily:T.mono}}>{c.lastDate}</span>
+                  </div>
+                </div>
+                {/* Expanded: all vendor prices */}
+                {isOpen && (
+                  <div style={{borderTop:`1px solid ${T.border}`,background:"#070f1c"}}>
+                    <div style={{padding:"8px 14px 4px",fontSize:10,fontWeight:700,color:T.t3,textTransform:"uppercase",letterSpacing:"0.08em"}}>
+                      All Suppliers
+                    </div>
+                    {c.vendorList.map((v,i)=>(
+                      <div key={v.name} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+                        padding:"8px 14px",borderTop:i>0?`1px solid ${T.border}`:"none"}}>
+                        <div style={{display:"flex",alignItems:"center",gap:8}}>
+                          <div style={{width:22,height:22,borderRadius:6,background:`linear-gradient(135deg,${catColor},${T.purple})`,
+                            display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:800,color:"#fff",flexShrink:0}}>
+                            {v.name[0]}
+                          </div>
+                          <div>
+                            <div style={{fontSize:12,fontWeight:600,color:T.t1}}>{v.name}</div>
+                            <div style={{fontSize:10,color:T.t3}}>{v.date}</div>
+                          </div>
+                        </div>
+                        <div style={{display:"flex",alignItems:"center",gap:6}}>
+                          {i===0 && <span style={{fontSize:9,background:`${T.teal}20`,color:T.teal,borderRadius:99,padding:"2px 6px",fontWeight:700}}>BEST</span>}
+                          <span style={{fontSize:13,fontWeight:800,color:i===0?T.teal:T.t1,fontFamily:T.mono}}>{fmt(v.price)}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div style={{padding:"8px 14px 10px",borderTop:`1px solid ${T.border}`,display:"flex",justifyContent:"center"}}>
+                  <span style={{fontSize:10,color:T.t3}}>{isOpen?"▲ Less":"▼ See all suppliers"}</span>
+                </div>
+              </div>
+            );
+          })}
         </div>
-      </Card>
+      )}
+
+      {/* ── TABLE VIEW ── */}
+      {viewMode==="table" && (
+        <Card s={{padding:0,overflow:"hidden"}}>
+          <div style={{overflowX:"auto"}}>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+              <thead>
+                <tr>
+                  {[["item","Item"],["","Category"],["","Suppliers"],["price","Best Price"],["date","Updated"]].map(([col,lbl])=>(
+                    col ? (
+                      <th key={lbl} onClick={()=>toggleSort(col)} style={{padding:"10px 14px",textAlign:col==="price"?"right":"left",
+                        background:"#070f1c",color:sortBy===col?T.teal:T.t3,fontWeight:700,fontSize:10,
+                        textTransform:"uppercase",letterSpacing:"0.1em",borderBottom:`1px solid ${T.border}`,
+                        cursor:"pointer",userSelect:"none",whiteSpace:"nowrap"}}>
+                        {lbl}{sortBy===col?(sortDir==="asc"?" ↑":" ↓"):""}
+                      </th>
+                    ) : (
+                      <th key={lbl} style={{padding:"10px 14px",background:"#070f1c",color:T.t3,fontWeight:700,fontSize:10,
+                        textTransform:"uppercase",letterSpacing:"0.1em",borderBottom:`1px solid ${T.border}`}}>{lbl}</th>
+                    )
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.length===0 ? (
+                  <tr><td colSpan={5} style={{padding:"48px",textAlign:"center",color:T.t3}}>No items found.</td></tr>
+                ) : filtered.map(c=>{
+                  const catColor = CAT_COLOR[c.category]||T.teal;
+                  return (
+                    <tr key={c.item} onMouseEnter={e=>e.currentTarget.style.background="#0f2236"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                      <td style={{padding:"11px 14px",borderBottom:`1px solid ${T.border}`,fontWeight:600,color:T.t1}}>{c.item}</td>
+                      <td style={{padding:"11px 14px",borderBottom:`1px solid ${T.border}`}}><Badge color={catColor} s={{fontSize:10}}>{CAT_ICON[c.category]||""} {c.category}</Badge></td>
+                      <td style={{padding:"11px 14px",borderBottom:`1px solid ${T.border}`}}>
+                        <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
+                          {c.vendorList.slice(0,3).map(v=><Badge key={v.name} color={T.t3} s={{fontSize:9}}>{v.name}</Badge>)}
+                          {c.vendorCount>3 && <Badge color={T.t3} s={{fontSize:9}}>+{c.vendorCount-3}</Badge>}
+                        </div>
+                      </td>
+                      <td style={{padding:"11px 14px",borderBottom:`1px solid ${T.border}`,textAlign:"right"}}>
+                        <div style={{fontWeight:800,color:T.teal,fontFamily:T.mono,fontSize:13}}>{fmt(c.lowestPrice)}</div>
+                        {c.vendorCount>1 && <div style={{fontSize:10,color:T.t3,marginTop:1}}>up to {fmt(c.highestPrice)}</div>}
+                      </td>
+                      <td style={{padding:"11px 14px",borderBottom:`1px solid ${T.border}`,textAlign:"right",fontSize:11,color:T.t3,fontFamily:"monospace"}}>{c.lastDate}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      {/* Count */}
+      <div style={{marginTop:14,textAlign:"center",fontSize:12,color:T.t3}}>
+        {filtered.length} item{filtered.length!==1?"s":""} · {catalog.reduce((s,c)=>s+c.vendorCount,0)} price entries
+      </div>
     </div>
   );
 }
@@ -3473,92 +3650,120 @@ function MarketCatalog({ purchases, vendors=[], guestMode=false }) {
 function LandingPage({ onLogin }) {
   const [marketData, setMarketData] = useState([]);
   const [loading,    setLoading]    = useState(true);
-  const [view,       setView]       = useState("market"); // "market" | "auth"
+  const [view,       setView]       = useState("catalog"); // "catalog" | "auth"
   const [animating,  setAnimating]  = useState(false);
+  const [statsCount, setStatsCount] = useState({ items:0, suppliers:0, entries:0 });
 
   useEffect(()=>{
     supabase.from("purchases").select("item,vendor,category,price,date").order("date",{ascending:false})
-      .then(({ data })=>{ if(data) setMarketData(data.map(r=>({...r,price:Number(r.price)}))); setLoading(false); });
+      .then(({ data })=>{
+        if(data) {
+          const d = data.map(r=>({...r,price:Number(r.price)}));
+          setMarketData(d);
+          const items = new Set(d.map(x=>x.item.toLowerCase())).size;
+          const suppliers = new Set(d.map(x=>x.vendor.toLowerCase())).size;
+          setStatsCount({ items, suppliers, entries: d.length });
+        }
+        setLoading(false);
+      });
   },[]);
 
   const switchView = (to) => {
     if (to===view||animating) return;
     setAnimating(true);
-    setTimeout(()=>{ setView(to); setAnimating(false); }, 280);
+    setTimeout(()=>{ setView(to); setAnimating(false); }, 220);
   };
 
   const fadeStyle = {
     opacity: animating ? 0 : 1,
-    transform: animating ? "translateY(12px)" : "translateY(0)",
-    transition: "opacity 0.28s ease, transform 0.28s ease",
+    transform: animating ? "translateY(8px)" : "translateY(0)",
+    transition: "opacity 0.22s ease, transform 0.22s ease",
   };
 
   return (
-    <div style={{minHeight:"100vh",background:T.mainBg,fontFamily:"'Sora',sans-serif",overflowY:"auto"}}>
+    <div style={{minHeight:"100vh",background:T.mainBg,fontFamily:"'Sora',sans-serif",overflowY:"auto",overflowX:"hidden"}}>
       <GS/>
+
       {/* bg glows */}
       <div style={{position:"fixed",inset:0,pointerEvents:"none",overflow:"hidden",zIndex:0}}>
-        <div style={{position:"absolute",top:"-15%",left:"-5%",width:700,height:700,background:`radial-gradient(circle,${T.tealGlow} 0%,transparent 65%)`,borderRadius:"50%"}}/>
-        <div style={{position:"absolute",bottom:"-20%",right:"-10%",width:600,height:600,background:`radial-gradient(circle,${T.purpleGlow} 0%,transparent 65%)`,borderRadius:"50%"}}/>
+        <div style={{position:"absolute",top:"-10%",left:"-10%",width:"min(700px,90vw)",height:"min(700px,90vw)",background:`radial-gradient(circle,${T.tealGlow} 0%,transparent 65%)`,borderRadius:"50%"}}/>
+        <div style={{position:"absolute",bottom:"-15%",right:"-10%",width:"min(600px,80vw)",height:"min(600px,80vw)",background:`radial-gradient(circle,${T.purpleGlow} 0%,transparent 65%)`,borderRadius:"50%"}}/>
       </div>
 
-      {/* ── Navbar ── */}
-      <div style={{position:"sticky",top:0,zIndex:100,background:`${T.mainBg}ee`,backdropFilter:"blur(12px)",
-        borderBottom:`1px solid ${T.border}`,padding:"13px 28px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-        {/* Logo */}
-        <div style={{display:"flex",alignItems:"center",gap:10}}>
-          <div style={{width:34,height:34,borderRadius:10,background:`linear-gradient(135deg,${T.teal},${T.purple})`,
-            display:"flex",alignItems:"center",justifyContent:"center",fontSize:16}}>🛒</div>
-          <div style={{fontSize:16,fontWeight:800,color:T.t1,letterSpacing:"-0.02em"}}>ProcureDesk</div>
+      {/* ── Sticky Navbar ── */}
+      <div style={{position:"sticky",top:0,zIndex:100,background:`${T.mainBg}f0`,backdropFilter:"blur(16px)",
+        borderBottom:`1px solid ${T.border}`,padding:"12px 20px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <div style={{display:"flex",alignItems:"center",gap:9}}>
+          <div style={{width:32,height:32,borderRadius:9,background:`linear-gradient(135deg,${T.teal},${T.purple})`,
+            display:"flex",alignItems:"center",justifyContent:"center",fontSize:15}}>🛒</div>
+          <div style={{fontSize:15,fontWeight:800,color:T.t1,letterSpacing:"-0.02em"}}>ProcureDesk</div>
         </div>
-        {/* Right nav buttons */}
-        <div style={{display:"flex",gap:10,alignItems:"center"}}>
-          <button onClick={()=>switchView("market")}
-            style={{border:`1.5px solid ${view==="market"?T.teal:T.border}`,borderRadius:10,padding:"8px 18px",
-              fontSize:13,fontWeight:600,background:view==="market"?`${T.teal}15`:"transparent",
-              color:view==="market"?T.teal:T.t2,cursor:"pointer",transition:"all 0.2s"}}>
-            🌍 Market
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          <button onClick={()=>switchView("catalog")}
+            style={{border:`1.5px solid ${view==="catalog"?T.teal:T.border}`,borderRadius:9,padding:"7px 14px",
+              fontSize:13,fontWeight:600,background:view==="catalog"?`${T.teal}15`:"transparent",
+              color:view==="catalog"?T.teal:T.t2,cursor:"pointer",transition:"all 0.2s"}}>
+            📖 Market
           </button>
           <button onClick={()=>switchView("auth")}
-            style={{border:"none",borderRadius:10,padding:"9px 22px",fontSize:13,fontWeight:700,
-              background:view==="auth"?T.tealDim:`linear-gradient(135deg,${T.teal},${T.tealDim})`,
-              color:"#fff",cursor:"pointer",transition:"all 0.2s",boxShadow:view==="market"?`0 4px 14px ${T.tealGlow}`:"none"}}>
-            Sign In / Sign Up →
+            style={{border:"none",borderRadius:9,padding:"8px 18px",fontSize:13,fontWeight:700,
+              background:`linear-gradient(135deg,${T.teal},${T.tealDim})`,
+              color:"#fff",cursor:"pointer",boxShadow:view==="catalog"?`0 4px 14px ${T.tealGlow}`:"none"}}>
+            Sign In →
           </button>
         </div>
       </div>
 
-      {/* ── Content (animated swap) ── */}
+      {/* ── Content ── */}
       <div style={{position:"relative",zIndex:1,...fadeStyle}}>
 
-        {/* ══ MARKET VIEW ══ */}
-        {view==="market" && (
-          <div style={{padding:"0 32px 48px"}}>
-            <div style={{textAlign:"center",padding:"52px 0 36px"}}>
-              <h1 style={{fontSize:40,fontWeight:800,color:T.t1,letterSpacing:"-0.03em",lineHeight:1.1,marginBottom:14}}>
-                Check Market Prices<br/><span style={{color:T.teal}}>Before You Buy</span>
+        {/* ══ CATALOG VIEW ══ */}
+        {view==="catalog" && (
+          <div>
+            {/* Hero */}
+            <div style={{textAlign:"center",padding:"40px 20px 32px",maxWidth:560,margin:"0 auto"}}>
+              <div style={{display:"inline-flex",alignItems:"center",gap:6,background:`${T.teal}15`,
+                border:`1px solid ${T.teal}30`,borderRadius:99,padding:"5px 14px",marginBottom:18}}>
+                <span style={{width:6,height:6,borderRadius:"50%",background:T.teal,display:"inline-block",animation:"pulse 1.5s infinite"}}/>
+                <span style={{fontSize:11,fontWeight:700,color:T.teal,letterSpacing:"0.08em"}}>LIVE MARKET PRICES</span>
+              </div>
+              <h1 style={{fontSize:"clamp(26px,6vw,42px)",fontWeight:800,color:T.t1,letterSpacing:"-0.03em",lineHeight:1.15,marginBottom:14}}>
+                Real Prices.<br/><span style={{color:T.teal}}>Smarter Buying.</span>
               </h1>
-              <p style={{fontSize:15,color:T.t2,maxWidth:500,margin:"0 auto 28px",lineHeight:1.6}}>
-                Browse real prices from procurement professionals across the region.
-                Compare vendors, track market rates, make smarter purchasing decisions.
+              <p style={{fontSize:"clamp(13px,3.5vw,15px)",color:T.t2,lineHeight:1.7,marginBottom:24}}>
+                Browse live procurement prices from businesses across the region. Compare suppliers, spot the best deals, and make smarter purchasing decisions — before you spend a kwacha.
               </p>
-              <button onClick={()=>document.getElementById("market-table").scrollIntoView({behavior:"smooth"})}
-                style={{border:`1.5px solid ${T.border2}`,borderRadius:12,padding:"12px 26px",fontSize:14,
-                  fontWeight:600,background:"transparent",color:T.t1,cursor:"pointer",transition:"border-color 0.2s"}}
-                onMouseEnter={e=>e.target.style.borderColor=T.teal}
-                onMouseLeave={e=>e.target.style.borderColor=T.border2}>
-                Browse Market ↓
+              {/* Live stats */}
+              <div style={{display:"flex",gap:12,justifyContent:"center",flexWrap:"wrap",marginBottom:28}}>
+                {[
+                  {n:loading?"…":statsCount.items,   l:"Unique Items"},
+                  {n:loading?"…":statsCount.suppliers, l:"Suppliers"},
+                  {n:loading?"…":statsCount.entries,  l:"Price Entries"},
+                ].map(s=>(
+                  <div key={s.l} style={{background:`${T.teal}10`,border:`1px solid ${T.teal}25`,borderRadius:12,padding:"10px 20px",minWidth:90}}>
+                    <div style={{fontSize:22,fontWeight:800,color:T.teal,fontFamily:T.mono}}>{s.n}</div>
+                    <div style={{fontSize:10,color:T.t3,fontWeight:600,textTransform:"uppercase",letterSpacing:"0.08em"}}>{s.l}</div>
+                  </div>
+                ))}
+              </div>
+              <button onClick={()=>switchView("auth")}
+                style={{border:"none",borderRadius:11,padding:"12px 28px",fontSize:14,fontWeight:700,
+                  background:`linear-gradient(135deg,${T.teal},${T.purple})`,color:"#fff",cursor:"pointer",
+                  boxShadow:`0 6px 20px ${T.tealGlow}`}}>
+                Track Your Own Prices →
               </button>
             </div>
 
-            {/* Market table */}
-            <div id="market-table">
-              <div style={{marginBottom:16}}>
-                <h2 style={{fontSize:18,fontWeight:800,color:T.t1,letterSpacing:"-0.02em"}}>Market Price Directory</h2>
-                <p style={{fontSize:12,color:T.t2,marginTop:3}}>Latest prices from all suppliers — anonymous, community-sourced</p>
+            {/* Catalog */}
+            <div style={{padding:"0 16px 60px",maxWidth:1100,margin:"0 auto"}}>
+              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16,flexWrap:"wrap",gap:10}}>
+                <div>
+                  <h2 style={{fontSize:18,fontWeight:800,color:T.t1}}>Market Catalog</h2>
+                  <p style={{fontSize:12,color:T.t3,marginTop:2}}>Community-sourced · Anonymous · Updated live</p>
+                </div>
               </div>
               {loading
-                ? <div style={{textAlign:"center",padding:"80px",color:T.t3}}>
+                ? <div style={{textAlign:"center",padding:"60px",color:T.t3}}>
                     <div className="spin" style={{width:32,height:32,border:`2px solid ${T.border}`,borderTopColor:T.teal,borderRadius:"50%",margin:"0 auto 12px"}}/>
                     Loading market data…
                   </div>
@@ -3567,24 +3772,34 @@ function LandingPage({ onLogin }) {
             </div>
 
             {/* CTA strip */}
-            <div style={{marginTop:48,textAlign:"center",padding:"36px 20px",background:T.cardBg,borderRadius:20,border:`1px solid ${T.border}`}}>
-              <h3 style={{fontSize:18,fontWeight:800,color:T.t1,marginBottom:8}}>Contribute Your Prices</h3>
-              <p style={{fontSize:13,color:T.t2,marginBottom:22,maxWidth:420,margin:"0 auto 22px"}}>
-                Create a free account to track procurement, add prices to the directory, and access full reports.
-              </p>
-              <button onClick={()=>switchView("auth")}
-                style={{border:"none",borderRadius:12,padding:"11px 26px",fontSize:14,fontWeight:700,
-                  background:`linear-gradient(135deg,${T.teal},${T.purple})`,color:"#fff",cursor:"pointer"}}>
-                Create Free Account →
-              </button>
+            <div style={{background:T.cardBg,borderTop:`1px solid ${T.border}`,padding:"40px 20px",textAlign:"center"}}>
+              <div style={{maxWidth:480,margin:"0 auto"}}>
+                <div style={{fontSize:28,marginBottom:12}}>📊</div>
+                <h3 style={{fontSize:20,fontWeight:800,color:T.t1,marginBottom:10}}>Want to track your own procurement?</h3>
+                <p style={{fontSize:13,color:T.t2,marginBottom:24,lineHeight:1.6}}>
+                  Sign up free to log purchases, manage suppliers, generate reports, and contribute prices to this catalog.
+                </p>
+                <button onClick={()=>switchView("auth")}
+                  style={{border:"none",borderRadius:12,padding:"13px 32px",fontSize:15,fontWeight:700,
+                    background:`linear-gradient(135deg,${T.teal},${T.purple})`,color:"#fff",cursor:"pointer",
+                    boxShadow:`0 6px 20px ${T.tealGlow}`}}>
+                  Create Free Account →
+                </button>
+              </div>
             </div>
           </div>
         )}
 
         {/* ══ AUTH VIEW ══ */}
         {view==="auth" && (
-          <div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"calc(100vh - 62px)",padding:20}}>
-            <AuthScreen onBack={()=>switchView("market")} embedded/>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"calc(100vh - 60px)",padding:20}}>
+            <div style={{width:"100%",maxWidth:420}}>
+              <button onClick={()=>switchView("catalog")}
+                style={{background:"none",border:"none",color:T.t2,fontSize:13,cursor:"pointer",marginBottom:20,display:"flex",alignItems:"center",gap:6,padding:0}}>
+                ← Back to Market
+              </button>
+              <AuthScreen onBack={()=>switchView("catalog")} embedded/>
+            </div>
           </div>
         )}
       </div>
@@ -3857,6 +4072,8 @@ export default function App() {
   // Waiting for data
   const prof = profile || { name: session.user.email, role:"", email:session.user.email, org:"", phone:"", currency:"MWK", dateFormat:"YYYY-MM-DD", defaultCat:"Foods", companyName:"", footerNote:"", isAdmin:false };
 
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
   const NAV = [
     { id:"home",      icon:"🏠", label:"Home" },
     { id:"purchases", icon:"🛒", label:"Purchases" },
@@ -3868,12 +4085,27 @@ export default function App() {
     ...(prof.isAdmin ? [{ id:"admin", icon:"🛡️", label:"Admin", badge:"ADMIN" }] : []),
   ];
 
+  // Bottom nav shows the 5 most important pages on mobile
+  const BOTTOM_NAV = [
+    { id:"home",      icon:"🏠", label:"Home" },
+    { id:"purchases", icon:"🛒", label:"Purchases" },
+    { id:"catalog",   icon:"📖", label:"Catalog" },
+    { id:"vendors",   icon:"🏭", label:"Vendors" },
+    { id:"more",      icon:"☰",  label:"More" },
+  ];
+
+  const goTo = (id) => {
+    if (id === "more") { setSidebarOpen(true); return; }
+    navigateTo(id);
+    setSidebarOpen(false);
+  };
+
   return (
     <div style={{ display:"flex", height:"100vh", width:"100vw", background:T.mainBg, fontFamily:"'Sora', sans-serif", overflow:"hidden", position:"fixed", top:0, left:0 }}>
       <GS />
 
-      {/* ── Sidebar ── */}
-      <div style={{ width:200, background:T.sidebar, display:"flex", flexDirection:"column", flexShrink:0, borderRight:`1px solid ${T.border}` }}>
+      {/* ── Desktop Sidebar ── */}
+      <div className="desktop-sidebar" style={{ width:200, background:T.sidebar, display:"flex", flexDirection:"column", flexShrink:0, borderRight:`1px solid ${T.border}` }}>
         {/* User */}
         <div style={{ padding:"18px 14px 14px", borderBottom:`1px solid ${T.border}` }}>
           <div style={{ display:"flex", alignItems:"center", gap:10 }}>
@@ -3887,12 +4119,10 @@ export default function App() {
             </div>
           </div>
         </div>
-
         {/* Nav */}
         <div style={{ flex:1, padding:"10px 8px", display:"flex", flexDirection:"column", gap:2, overflowY:"auto" }}>
           {NAV.map(n=><NavItem key={n.id} icon={n.icon} label={n.label} active={page===n.id} onClick={()=>navigateTo(n.id)} badge={n.badge}/>)}
         </div>
-
         {/* Bottom */}
         <div style={{ padding:"10px 8px 14px", borderTop:`1px solid ${T.border}`, display:"flex", flexDirection:"column", gap:2 }}>
           <NavItem icon="⚙️" label="Settings" active={page==="settings"} onClick={()=>navigateTo("settings")}/>
@@ -3900,25 +4130,70 @@ export default function App() {
         </div>
       </div>
 
+      {/* ── Mobile Drawer Overlay ── */}
+      {sidebarOpen && (
+        <div className="sidebar-overlay" onClick={()=>setSidebarOpen(false)} style={{zIndex:300}}>
+          <div onClick={e=>e.stopPropagation()} style={{
+            position:"absolute", left:0, top:0, bottom:0, width:240,
+            background:T.sidebar, display:"flex", flexDirection:"column",
+            borderRight:`1px solid ${T.border}`, animation:"slideIn 0.22s ease",
+          }}>
+            {/* User */}
+            <div style={{ padding:"18px 14px 14px", borderBottom:`1px solid ${T.border}`, display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+              <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+                <div style={{ width:36, height:36, borderRadius:"50%", background:"linear-gradient(135deg,#f97316,#f59e0b)",
+                  display:"flex", alignItems:"center", justifyContent:"center", fontSize:13, fontWeight:800, color:"#fff", flexShrink:0 }}>
+                  {prof.name.split(" ").map(w=>w[0]).join("").slice(0,2).toUpperCase()}
+                </div>
+                <div style={{ minWidth:0 }}>
+                  <div style={{ fontSize:13, fontWeight:700, color:T.t1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", maxWidth:140 }}>{prof.name}</div>
+                  {prof.role && <div style={{ fontSize:10, color:T.t3 }}>{prof.role}</div>}
+                </div>
+              </div>
+              <button onClick={()=>setSidebarOpen(false)} style={{ background:"none", border:"none", color:T.t3, fontSize:20, cursor:"pointer", padding:"4px 6px" }}>×</button>
+            </div>
+            {/* Full nav */}
+            <div style={{ flex:1, padding:"10px 8px", display:"flex", flexDirection:"column", gap:2, overflowY:"auto" }}>
+              {NAV.map(n=><NavItem key={n.id} icon={n.icon} label={n.label} active={page===n.id} onClick={()=>goTo(n.id)} badge={n.badge}/>)}
+            </div>
+            <div style={{ padding:"10px 8px 20px", borderTop:`1px solid ${T.border}`, display:"flex", flexDirection:"column", gap:2 }}>
+              <NavItem icon="⚙️" label="Settings" active={page==="settings"} onClick={()=>goTo("settings")}/>
+              <NavItem icon="🚪" label="Sign Out" active={false} onClick={signOut}/>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Main Content ── */}
-      <div style={{ flex:1, overflowY:"auto", overflowX:"hidden", padding:"20px 22px", position:"relative", minWidth:0, maxWidth:"100%" }}>
-        {/* Block render until profile loaded — prevents home flash before last_page is restored */}
+      <div className="main-content-area" style={{ flex:1, overflowY:"auto", overflowX:"hidden", padding:"20px 22px", position:"relative", minWidth:0, maxWidth:"100%" }}>
+
+        {/* Mobile Header */}
+        <div className="mobile-header">
+          <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+            <div style={{ width:28, height:28, borderRadius:8, background:`linear-gradient(135deg,${T.teal},${T.purple})`, display:"flex", alignItems:"center", justifyContent:"center", fontSize:13 }}>🛒</div>
+            <span style={{ fontSize:14, fontWeight:800, color:T.t1 }}>ProcureDesk</span>
+          </div>
+          <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+            {dataLoading && <div className="spin" style={{ width:14, height:14, border:`2px solid ${T.border}`, borderTopColor:T.teal, borderRadius:"50%" }}/>}
+            <button onClick={()=>setSidebarOpen(true)}
+              style={{ background:"none", border:`1px solid ${T.border}`, borderRadius:8, color:T.t2, fontSize:18, cursor:"pointer", padding:"5px 9px", lineHeight:1 }}>☰</button>
+          </div>
+        </div>
+
+        {/* Block render until profile loaded */}
         {!profile && (
-          <div style={{ position:"absolute", inset:0, display:"flex", alignItems:"center", justifyContent:"center",
-            background:T.mainBg, zIndex:20 }}>
+          <div style={{ position:"absolute", inset:0, display:"flex", alignItems:"center", justifyContent:"center", background:T.mainBg, zIndex:20 }}>
             <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:14 }}>
-              <div className="spin" style={{ width:32, height:32, border:`3px solid ${T.border}`,
-                borderTopColor:T.teal, borderRadius:"50%" }}/>
+              <div className="spin" style={{ width:32, height:32, border:`3px solid ${T.border}`, borderTopColor:T.teal, borderRadius:"50%" }}/>
               <span style={{ fontSize:12, color:T.t3 }}>Loading your workspace…</span>
             </div>
           </div>
         )}
-        {/* Data syncing indicator */}
+        {/* Data syncing indicator — desktop only */}
         {dataLoading && profile && (
-          <div style={{ position:"absolute", top:16, right:24, display:"flex", alignItems:"center", gap:8,
+          <div className="desktop-sidebar" style={{ position:"absolute", top:16, right:24, display:"flex", alignItems:"center", gap:8,
             background:T.cardBg, border:`1px solid ${T.border}`, borderRadius:8, padding:"6px 12px", zIndex:10 }}>
-            <div className="spin" style={{ width:12, height:12, border:`2px solid ${T.border}`,
-              borderTopColor:T.teal, borderRadius:"50%" }}/>
+            <div className="spin" style={{ width:12, height:12, border:`2px solid ${T.border}`, borderTopColor:T.teal, borderRadius:"50%" }}/>
             <span style={{ fontSize:11, color:T.t2 }}>Syncing…</span>
           </div>
         )}
@@ -3943,6 +4218,17 @@ export default function App() {
         {page==="settings"  && <Settings profile={prof} setProfile={saveProfile}/>}
         {page==="admin"     && prof.isAdmin && <AdminPanel session={session}/>}
       </div>
+
+      {/* ── Mobile Bottom Nav ── */}
+      <nav className="mobile-bottom-nav">
+        {BOTTOM_NAV.map(n => (
+          <button key={n.id} className={`mob-nav-item${(page===n.id)||(n.id==="more"&&!BOTTOM_NAV.find(x=>x.id===page&&x.id!=="more"))?"":""} ${page===n.id?"active":""}`}
+            onClick={()=>goTo(n.id)}>
+            <span className="mob-nav-icon">{n.icon}</span>
+            <span className="mob-nav-label">{n.label}</span>
+          </button>
+        ))}
+      </nav>
     </div>
   );
 }
