@@ -117,6 +117,116 @@ const T = {
   mono: "'JetBrains Mono', monospace",
 };
 
+/* ── CSV / Excel Export Utility ─────────────────────────────────────────── */
+const exportCSV = (rows, filename="export.csv") => {
+  if (!rows || rows.length === 0) return;
+  const headers = Object.keys(rows[0]);
+  const escape  = v => `"${String(v==null?"":v).replace(/"/g,'""')}"`;
+  const csv = [headers.map(escape).join(","), ...rows.map(r => headers.map(k=>escape(r[k])).join(","))].join("\n");
+  const blob = new Blob([csv], { type:"text/csv;charset=utf-8;" });
+  const url  = URL.createObjectURL(blob);
+  const a    = Object.assign(document.createElement("a"), { href:url, download:filename });
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
+
+/* ── Supplier Performance Score Engine ──────────────────────────────────── */
+// Returns a score 0-100 + grade + breakdown for each vendor name
+const calcVendorScores = (purchases) => {
+  if (!purchases.length) return {};
+  const now = new Date();
+  // group by vendor
+  const byVendor = {};
+  purchases.forEach(p => {
+    if (!byVendor[p.vendor]) byVendor[p.vendor] = [];
+    byVendor[p.vendor].push(p);
+  });
+  const result = {};
+  Object.entries(byVendor).forEach(([vendor, rows]) => {
+    // 1. Frequency (orders per month active) — 0-35
+    const dates   = rows.map(r=>new Date(r.date)).sort((a,b)=>a-b);
+    const spanMs  = Math.max(now - dates[0], 1);
+    const spanMo  = spanMs / (1000*60*60*24*30);
+    const freq    = Math.min(rows.length / Math.max(spanMo,1), 10); // cap at 10/mo
+    const freqScore = Math.round((freq / 10) * 35);
+
+    // 2. Price consistency — lower variance = better — 0-30
+    const itemPrices = {};
+    rows.forEach(r => {
+      if (!itemPrices[r.item]) itemPrices[r.item] = [];
+      itemPrices[r.item].push(Number(r.price));
+    });
+    let consistencySum = 0, consistencyCount = 0;
+    Object.values(itemPrices).forEach(prices => {
+      if (prices.length < 2) return;
+      const mean = prices.reduce((s,v)=>s+v,0)/prices.length;
+      const cv   = Math.sqrt(prices.reduce((s,v)=>s+(v-mean)**2,0)/prices.length) / mean;
+      consistencySum += Math.max(0, 1-cv*5); // full points if CV<0.05, 0 if CV>0.2
+      consistencyCount++;
+    });
+    const consScore = consistencyCount > 0
+      ? Math.round((consistencySum / consistencyCount) * 30)
+      : 15; // neutral if only 1 purchase per item
+
+    // 3. Recency — how recently ordered — 0-20
+    const lastDate    = dates[dates.length-1];
+    const daysSince   = (now - lastDate) / (1000*60*60*24);
+    const recencyScore = Math.round(Math.max(0, 1 - daysSince/180) * 20); // full if within 1 week, 0 after 6 months
+
+    // 4. Variety — unique items — 0-15
+    const uniqueItems  = new Set(rows.map(r=>r.item)).size;
+    const varietyScore = Math.min(Math.round((uniqueItems / 10) * 15), 15);
+
+    const total = freqScore + consScore + recencyScore + varietyScore;
+    const grade = total>=85?"A+":total>=75?"A":total>=65?"B+":total>=55?"B":total>=45?"C+":total>=35?"C":"D";
+    result[vendor] = {
+      score: total, grade,
+      breakdown: { frequency:freqScore, consistency:consScore, recency:recencyScore, variety:varietyScore },
+      orders: rows.length, lastDate: lastDate.toISOString().slice(0,10),
+      uniqueItems, spend: rows.reduce((s,r)=>s+Number(r.qty)*Number(r.price),0),
+    };
+  });
+  return result;
+};
+
+/* ── Price Change Alert Engine ───────────────────────────────────────────── */
+// Compares user's last known price per item+vendor vs market latest
+// Returns alerts array: { item, vendor, oldPrice, newPrice, changePct, dir }
+const calcPriceAlerts = (userPurchases, marketData, threshold=0.10) => {
+  // Build user's last known price per item+vendor
+  const userPrices = {};
+  userPurchases.forEach(p => {
+    const key = `${p.item.toLowerCase()}||${p.vendor.toLowerCase()}`;
+    if (!userPrices[key] || p.date > userPrices[key].date) {
+      userPrices[key] = { item:p.item, vendor:p.vendor, price:Number(p.price), date:p.date };
+    }
+  });
+  // Build market's latest price per item+vendor
+  const marketPrices = {};
+  marketData.forEach(p => {
+    const key = `${p.item.toLowerCase()}||${p.vendor.toLowerCase()}`;
+    if (!marketPrices[key] || p.date > marketPrices[key].date) {
+      marketPrices[key] = { item:p.item, vendor:p.vendor, price:Number(p.price), date:p.date };
+    }
+  });
+  // Find alerts where market price differs from user's last price by > threshold
+  const alerts = [];
+  Object.entries(userPrices).forEach(([key, u]) => {
+    const m = marketPrices[key];
+    if (!m || m.date <= u.date) return; // no newer market data
+    const changePct = (m.price - u.price) / u.price;
+    if (Math.abs(changePct) >= threshold) {
+      alerts.push({
+        item: u.item, vendor: u.vendor,
+        oldPrice: u.price, newPrice: m.price,
+        changePct, dir: changePct > 0 ? "up" : "down",
+        oldDate: u.date, newDate: m.date,
+      });
+    }
+  });
+  return alerts.sort((a,b) => Math.abs(b.changePct) - Math.abs(a.changePct));
+};
+
 /* ── Sample Data ────────────────────────────────────────────────────────── */
 const INITIAL_PURCHASES = [
   { id:1, vendor:"FreshMart", item:"Rice (5kg)", qty:10, price:8.50, category:"Foods", date:"2025-02-10" },
@@ -148,6 +258,69 @@ const fmtK = n => n>=1000 ? `Mwk ${(n/1000).toFixed(1)}k` : `Mwk ${Number(n).toF
 const today = () => new Date().toISOString().slice(0,10);
 const uid = () => Date.now() + Math.random();
 const capFirst = s => s.replace(/(^|\s)\S/g, c => c.toUpperCase());
+
+/* ── Price Alerts Banner ─────────────────────────────────────────────────── */
+function PriceAlertsBanner({ alerts, onDismiss }) {
+  const [open, setOpen] = useState(false);
+  if (!alerts || alerts.length === 0) return null;
+  const upCount   = alerts.filter(a=>a.dir==="up").length;
+  const downCount = alerts.filter(a=>a.dir==="down").length;
+  return (
+    <div style={{marginBottom:20,borderRadius:14,overflow:"hidden",border:`1px solid ${T.amber}40`,background:`${T.amber}08`}}>
+      {/* Header row */}
+      <div style={{display:"flex",alignItems:"center",gap:12,padding:"12px 18px",cursor:"pointer"}}
+        onClick={()=>setOpen(o=>!o)}>
+        <span style={{fontSize:18}}>🔔</span>
+        <div style={{flex:1}}>
+          <span style={{fontSize:13,fontWeight:700,color:T.amber}}>Price Alerts</span>
+          <span style={{fontSize:12,color:T.t2,marginLeft:10}}>
+            {alerts.length} change{alerts.length!==1?"s":""}
+            {upCount>0   && <span style={{color:"#e05c5c",marginLeft:8}}>↑ {upCount} up</span>}
+            {downCount>0 && <span style={{color:T.green,marginLeft:8}}>↓ {downCount} down</span>}
+          </span>
+        </div>
+        <span style={{fontSize:12,color:T.t3}}>{open?"▲ Hide":"▼ Show"}</span>
+        {onDismiss && (
+          <button onClick={e=>{e.stopPropagation();onDismiss();}}
+            style={{background:"none",border:"none",color:T.t3,fontSize:16,cursor:"pointer",padding:"2px 6px",lineHeight:1}}>×</button>
+        )}
+      </div>
+      {/* Alert rows */}
+      {open && (
+        <div style={{borderTop:`1px solid ${T.amber}25`}}>
+          {alerts.slice(0,8).map((a,i)=>{
+            const color = a.dir==="up" ? "#e05c5c" : T.green;
+            const pct   = (a.changePct*100).toFixed(1);
+            return (
+              <div key={i} style={{display:"flex",alignItems:"center",gap:12,padding:"10px 18px",
+                borderBottom:i<alerts.length-1?`1px solid ${T.border}`:"none",flexWrap:"wrap"}}>
+                <span style={{fontSize:16}}>{a.dir==="up"?"📈":"📉"}</span>
+                <div style={{flex:1,minWidth:160}}>
+                  <div style={{fontSize:12,fontWeight:600,color:T.t1}}>{a.item}</div>
+                  <div style={{fontSize:11,color:T.t3}}>{a.vendor}</div>
+                </div>
+                <div style={{display:"flex",gap:10,alignItems:"center",flexWrap:"wrap"}}>
+                  <span style={{fontSize:12,color:T.t3,fontFamily:T.mono}}>{fmt(a.oldPrice)}</span>
+                  <span style={{fontSize:13,color:T.t3}}>→</span>
+                  <span style={{fontSize:13,fontWeight:700,color,fontFamily:T.mono}}>{fmt(a.newPrice)}</span>
+                  <span style={{background:`${color}18`,color,borderRadius:99,padding:"2px 9px",fontSize:11,fontWeight:700}}>
+                    {a.dir==="up"?"+":""}{pct}%
+                  </span>
+                  <span style={{fontSize:10,color:T.t3}}>since {a.oldDate}</span>
+                </div>
+              </div>
+            );
+          })}
+          {alerts.length > 8 && (
+            <div style={{padding:"8px 18px",fontSize:11,color:T.t3,textAlign:"center"}}>
+              +{alerts.length-8} more changes — check Market page for full list
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 /* ── Primitive UI ───────────────────────────────────────────────────────── */
 function Card({ children, s={}, className="" }) {
@@ -293,7 +466,7 @@ function NavItem({ icon, label, active, onClick, badge }) {
 /* ══════════════════════════════════════════════════════════════════════════
    PAGE: HOME / DASHBOARD
 ══════════════════════════════════════════════════════════════════════════ */
-function Home({ purchases, vendors, go, openNewPurchase, openAddVendor, profile }) {
+function Home({ purchases, vendors, go, openNewPurchase, openAddVendor, profile, priceAlerts=[] }) {
   const total = purchases.reduce((s,p)=>s+p.qty*p.price, 0);
   const totalQty = purchases.reduce((s,p)=>s+p.qty, 0);
   const uniqueItems = new Set(purchases.map(p=>p.item)).size;
@@ -327,6 +500,9 @@ function Home({ purchases, vendors, go, openNewPurchase, openAddVendor, profile 
         <h1 style={{fontSize:20,fontWeight:800,color:T.t1,letterSpacing:"-0.02em"}}>Home</h1>
         <p style={{fontSize:13,color:T.t2,marginTop:3}}>Welcome back{profile?.name ? `, ${profile.name.split(" ")[0]}` : ""}! Here's your dashboard.</p>
       </div>
+
+      {/* Price Alerts */}
+      <PriceAlertsBanner alerts={priceAlerts}/>
 
       {/* Big metric cards */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:14,marginBottom:20}}>
@@ -1002,6 +1178,129 @@ function Purchases({ purchases, setPurchases, vendors, modalOpen, setModalOpen, 
   );
 }
 
+/* ── Vendor Performance Scores Panel ───────────────────────────────────── */
+function VendorScoresPanel({ vendors, vendorScores, stats, onSelect }) {
+  const GRADE_COLOR = { "A+":T.teal,"A":T.teal,"B+":T.green,"B":T.green,"C+":T.amber,"C":T.amber,"D":T.red };
+
+  const ranked = useMemo(()=>{
+    return [...vendors]
+      .map(v=>({ ...v, sc: vendorScores[v.name] || { score:0, grade:"D", breakdown:{frequency:0,consistency:0,recency:0,variety:0}, orders:0, uniqueItems:0 } }))
+      .sort((a,b)=>b.sc.score - a.sc.score);
+  },[vendors, vendorScores]);
+
+  if (vendors.length === 0) return (
+    <div style={{textAlign:"center",padding:"80px 20px",color:T.t3}}>
+      <div style={{fontSize:36,marginBottom:12}}>⭐</div>
+      <div style={{fontSize:14,fontWeight:600,color:T.t2,marginBottom:6}}>No vendors yet</div>
+      <div style={{fontSize:12}}>Add vendors and purchases to see performance scores.</div>
+    </div>
+  );
+
+  const topVendor = ranked[0];
+
+  return (
+    <div>
+      {/* Explanation card */}
+      <div style={{padding:"14px 18px",background:`${T.purple}10`,border:`1px solid ${T.purple}30`,borderRadius:12,marginBottom:20,fontSize:12,color:T.t2,lineHeight:1.6}}>
+        <span style={{fontWeight:700,color:T.purple}}>How scores work: </span>
+        Frequency (35pts) — how often you order · Consistency (30pts) — stable prices over time · Recency (20pts) — how recently ordered · Variety (15pts) — range of items supplied
+      </div>
+
+      {/* Top performer highlight */}
+      {topVendor?.sc.score > 0 && (
+        <div style={{marginBottom:20,padding:"18px 22px",background:`linear-gradient(135deg,${T.teal}12,${T.purple}12)`,
+          border:`1px solid ${T.teal}30`,borderRadius:16,display:"flex",alignItems:"center",gap:16,cursor:"pointer"}}
+          onClick={()=>onSelect(topVendor)}>
+          <div style={{fontSize:28}}>🥇</div>
+          <div style={{flex:1}}>
+            <div style={{fontSize:11,fontWeight:700,color:T.t3,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:4}}>Top Performing Supplier</div>
+            <div style={{fontSize:18,fontWeight:800,color:T.t1}}>{topVendor.name}</div>
+            <div style={{fontSize:12,color:T.t2,marginTop:2}}>{topVendor.sc.orders} orders · {topVendor.sc.uniqueItems} unique items</div>
+          </div>
+          <div style={{textAlign:"center"}}>
+            <div style={{fontSize:36,fontWeight:800,color:T.teal,fontFamily:T.mono,lineHeight:1}}>{topVendor.sc.score}</div>
+            <div style={{fontSize:11,color:T.t3}}>/ 100</div>
+            <Badge color={GRADE_COLOR[topVendor.sc.grade]||T.teal} s={{marginTop:4,fontSize:14,padding:"4px 12px"}}>{topVendor.sc.grade}</Badge>
+          </div>
+        </div>
+      )}
+
+      {/* Scores table */}
+      <Card s={{padding:0,overflow:"hidden"}}>
+        <div style={{overflowX:"auto"}}>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+            <thead>
+              <tr style={{background:"#070f1c"}}>
+                <th style={{padding:"10px 16px",textAlign:"left",color:T.t3,fontWeight:700,fontSize:10,textTransform:"uppercase",letterSpacing:"0.1em",borderBottom:`1px solid ${T.border}`}}>#</th>
+                <th style={{padding:"10px 16px",textAlign:"left",color:T.t3,fontWeight:700,fontSize:10,textTransform:"uppercase",letterSpacing:"0.1em",borderBottom:`1px solid ${T.border}`}}>Supplier</th>
+                <th style={{padding:"10px 16px",textAlign:"center",color:T.t3,fontWeight:700,fontSize:10,textTransform:"uppercase",letterSpacing:"0.1em",borderBottom:`1px solid ${T.border}`}}>Grade</th>
+                <th style={{padding:"10px 16px",textAlign:"right",color:T.t3,fontWeight:700,fontSize:10,textTransform:"uppercase",letterSpacing:"0.1em",borderBottom:`1px solid ${T.border}`}}>Score</th>
+                <th style={{padding:"10px 16px",textAlign:"left",color:T.t3,fontWeight:700,fontSize:10,textTransform:"uppercase",letterSpacing:"0.1em",borderBottom:`1px solid ${T.border}`,minWidth:200}}>Breakdown</th>
+                <th style={{padding:"10px 16px",textAlign:"right",color:T.t3,fontWeight:700,fontSize:10,textTransform:"uppercase",letterSpacing:"0.1em",borderBottom:`1px solid ${T.border}`}}>Orders</th>
+                <th style={{padding:"10px 16px",textAlign:"right",color:T.t3,fontWeight:700,fontSize:10,textTransform:"uppercase",letterSpacing:"0.1em",borderBottom:`1px solid ${T.border}`}}>Items</th>
+              </tr>
+            </thead>
+            <tbody>
+              {ranked.map((v,i)=>{
+                const sc = v.sc;
+                const gradeColor = GRADE_COLOR[sc.grade]||T.red;
+                const bd = sc.breakdown;
+                const barItems = [
+                  {label:"Freq",val:bd.frequency,max:35,color:T.teal},
+                  {label:"Cons",val:bd.consistency,max:30,color:T.purple},
+                  {label:"Rec",val:bd.recency,max:20,color:T.amber},
+                  {label:"Var",val:bd.variety,max:15,color:T.green},
+                ];
+                return (
+                  <tr key={v.id} style={{cursor:"pointer"}}
+                    onMouseEnter={e=>e.currentTarget.style.background="#0f2236"}
+                    onMouseLeave={e=>e.currentTarget.style.background="transparent"}
+                    onClick={()=>onSelect(v)}>
+                    <td style={{padding:"12px 16px",borderBottom:`1px solid ${T.border}`,color:T.t3,fontSize:12,fontWeight:700}}>
+                      {i===0?"🥇":i===1?"🥈":i===2?"🥉":`#${i+1}`}
+                    </td>
+                    <td style={{padding:"12px 16px",borderBottom:`1px solid ${T.border}`}}>
+                      <div style={{fontWeight:600,color:T.t1}}>{v.name}</div>
+                      <div style={{fontSize:11,color:T.t3}}>{v.category}</div>
+                    </td>
+                    <td style={{padding:"12px 16px",borderBottom:`1px solid ${T.border}`,textAlign:"center"}}>
+                      <span style={{background:`${gradeColor}20`,color:gradeColor,borderRadius:99,padding:"4px 12px",
+                        fontSize:14,fontWeight:800,border:`1px solid ${gradeColor}40`}}>{sc.grade}</span>
+                    </td>
+                    <td style={{padding:"12px 16px",borderBottom:`1px solid ${T.border}`,textAlign:"right"}}>
+                      <div style={{fontSize:18,fontWeight:800,color:gradeColor,fontFamily:T.mono}}>{sc.score}</div>
+                      <div style={{fontSize:10,color:T.t3}}>/ 100</div>
+                    </td>
+                    <td style={{padding:"12px 16px",borderBottom:`1px solid ${T.border}`}}>
+                      {sc.score === 0 ? (
+                        <div style={{fontSize:11,color:T.t3}}>No purchase history</div>
+                      ) : (
+                        <div style={{display:"flex",flexDirection:"column",gap:4}}>
+                          {barItems.map(b=>(
+                            <div key={b.label} style={{display:"flex",alignItems:"center",gap:6}}>
+                              <span style={{fontSize:9,color:T.t3,width:28,flexShrink:0}}>{b.label}</span>
+                              <div style={{flex:1,height:4,background:"#0a1628",borderRadius:99}}>
+                                <div style={{height:"100%",width:`${(b.val/b.max)*100}%`,background:b.color,borderRadius:99,transition:"width 0.6s ease"}}/>
+                              </div>
+                              <span style={{fontSize:9,color:b.color,fontFamily:T.mono,width:22,textAlign:"right",flexShrink:0}}>{b.val}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </td>
+                    <td style={{padding:"12px 16px",borderBottom:`1px solid ${T.border}`,textAlign:"right",fontFamily:T.mono,color:T.t1,fontWeight:600}}>{sc.orders}</td>
+                    <td style={{padding:"12px 16px",borderBottom:`1px solid ${T.border}`,textAlign:"right",fontFamily:T.mono,color:T.t1,fontWeight:600}}>{sc.uniqueItems}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
 /* ══════════════════════════════════════════════════════════════════════════
    PAGE: VENDORS  (enhanced — card grid + list toggle, rich filters)
 ══════════════════════════════════════════════════════════════════════════ */
@@ -1010,7 +1309,7 @@ function Vendors({ vendors, setVendors, purchases, setPurchases, triggerAdd, cle
   const [editOpen,   setEditOpen]  = useState(false);
   const [editForm,   setEditForm]  = useState({});
   const [editSaving, setEditSaving]= useState(false);
-  const [editRowId,  setEditRowId] = useState(null);   // inline row edit
+  const [editRowId,  setEditRowId] = useState(null);
   const [editRow,    setEditRow]   = useState({});
   const [showAdd,    setShowAdd]   = useState(false);
   const [delVId,     setDelVId]    = useState(null);
@@ -1019,6 +1318,7 @@ function Vendors({ vendors, setVendors, purchases, setPurchases, triggerAdd, cle
   const [filterCat,  setFilterCat] = useState(savedFilters.cat||"All");
   const [sortBy,     setSortBy]    = useState(savedFilters.sort||"name");
   const [viewMode,   setViewMode]  = useState(savedFilters.view||"grid");
+  const [activeTab,  setActiveTab] = useState("directory"); // "directory" | "scores"
 
   // Sync from parent when savedFilters loads async (only once)
   const filtersLoaded = useRef(false);
@@ -1063,6 +1363,8 @@ function Vendors({ vendors, setVendors, purchases, setPurchases, triggerAdd, cle
     });
     return m;
   },[purchases]);
+
+  const vendorScores = useMemo(()=>calcVendorScores(purchases),[purchases]);
 
   const grandTotal = Object.values(stats).reduce((s,v)=>s+v.spend, 0);
   const catOpts = useMemo(()=>["All", ...new Set(vendors.map(v=>v.category))],[vendors]);
@@ -1300,13 +1602,33 @@ function Vendors({ vendors, setVendors, purchases, setPurchases, triggerAdd, cle
   return (
     <div className="fade-up">
       {/* Header */}
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:20}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:20,flexWrap:"wrap",gap:12}}>
         <div>
           <h1 style={{fontSize:22,fontWeight:800,color:T.t1,letterSpacing:"-0.02em"}}>Vendors</h1>
           <p style={{fontSize:13,color:T.t2,marginTop:3}}>Supplier directory — {vendors.length} registered partner{vendors.length!==1?"s":""}</p>
         </div>
-        <Btn onClick={()=>{ setShowAdd(true); setFormErr(""); }}>＋ Add Vendor</Btn>
+        <div style={{display:"flex",gap:10,alignItems:"center"}}>
+          {/* Tab toggle */}
+          <div style={{display:"flex",background:"#070f1c",border:`1px solid ${T.border}`,borderRadius:10,overflow:"hidden"}}>
+            {[["directory","🏭 Directory"],["scores","⭐ Performance"]].map(([tab,lbl])=>(
+              <button key={tab} onClick={()=>setActiveTab(tab)}
+                style={{border:"none",padding:"9px 16px",fontSize:12,fontWeight:600,cursor:"pointer",transition:"all 0.15s",
+                  background:activeTab===tab?T.teal:"transparent",color:activeTab===tab?"#fff":T.t3}}>
+                {lbl}
+              </button>
+            ))}
+          </div>
+          <Btn onClick={()=>{ setShowAdd(true); setFormErr(""); }}>＋ Add Vendor</Btn>
+        </div>
       </div>
+
+      {/* ══ PERFORMANCE SCORES TAB ══ */}
+      {activeTab==="scores" && (
+        <VendorScoresPanel vendors={vendors} vendorScores={vendorScores} stats={stats} onSelect={v=>{ setActiveTab("directory"); setSelected(v); }}/>
+      )}
+
+      {/* ══ DIRECTORY TAB ══ */}
+      {activeTab==="directory" && (<>
 
       {/* ── Toolbar ── */}
       <div style={{display:"flex",gap:10,marginBottom:14,flexWrap:"wrap",alignItems:"center"}}>
@@ -1542,6 +1864,9 @@ function Vendors({ vendors, setVendors, purchases, setPurchases, triggerAdd, cle
           </table>
         </Card>
       )}
+
+      {/* end directory tab */}
+      </>)}
 
       {/* Add Vendor modal */}
       {/* Edit vendor modal */}
@@ -1962,6 +2287,15 @@ function Reports({ purchases, vendors, session, isAdmin }) {
               <Btn v="primary"  onClick={saveAndPreview} disabled={reportSaving||data.length===0} s={{marginLeft:"auto"}}>
                 {reportSaving?"Saving…":"👁 Preview Report"}
               </Btn>
+              <Btn v="outline" onClick={()=>{
+                const rows = data.map(p=>({
+                  Date:p.date, Vendor:p.vendor, Item:p.item, Category:p.category,
+                  Qty:p.qty, "Unit Price (Mwk)":p.price, "Total (Mwk)":Number(p.qty)*Number(p.price)
+                }));
+                exportCSV(rows, `ProcureDesk_Report_${today()}.csv`);
+              }} disabled={data.length===0}>
+                ⬇ Export CSV
+              </Btn>
             </div>
           </Card>
 
@@ -2117,6 +2451,13 @@ function Reports({ purchases, vendors, session, isAdmin }) {
                           const rows=getHistoryRows(r); const cats2=getHistoryCats(r);
                           printReport(rows, r.title, cats2, Number(r.total_spend));
                         }}>⬇ PDF</Btn>
+                        <Btn v="ghost" s={{fontSize:12,padding:"6px 10px"}} onClick={()=>{
+                          const rows=getHistoryRows(r).map(p=>({
+                            Date:p.date,Vendor:p.vendor,Item:p.item,Category:p.category,
+                            Qty:p.qty,"Unit Price (Mwk)":p.price,"Total (Mwk)":Number(p.qty)*Number(p.price)
+                          }));
+                          exportCSV(rows, `${r.title.replace(/[^a-z0-9]/gi,"_")}.csv`);
+                        }}>⬇ CSV</Btn>
                         {isAdmin&&<Btn v="danger" s={{fontSize:12,padding:"6px 10px"}} onClick={()=>setDelReportId(r.id)}>🗑</Btn>}
                       </div>
                     </div>
@@ -2847,7 +3188,254 @@ function AppLegacy() {
 /* ══════════════════════════════════════════════════════════════════════════
    PAGE: MARKET  (logged-in view — consolidated price directory)
 ══════════════════════════════════════════════════════════════════════════ */
-function MarketPage({ session }) {
+/* ══════════════════════════════════════════════════════════════════════════
+   PAGE: TEAM VIEW  (org-shared purchases from same organization)
+══════════════════════════════════════════════════════════════════════════ */
+function TeamView({ session, profile }) {
+  const [teamPurchases, setTeamPurchases] = useState([]);
+  const [members,       setMembers]       = useState([]);
+  const [loading,       setLoading]       = useState(true);
+  const [search,        setSearch]        = useState("");
+  const [filterMember,  setFilterMember]  = useState("All");
+  const [filterCat,     setFilterCat]     = useState("All");
+  const [lastRefresh,   setLastRefresh]   = useState(null);
+  const [viewMode,      setViewMode]      = useState("feed"); // "feed" | "table"
+
+  const org = profile?.org || "";
+
+  const load = async () => {
+    if (!session || !org) return;
+    setLoading(true);
+    // Get all profiles in same org
+    const { data:profiles } = await supabase.from("profiles")
+      .select("id,full_name,role")
+      .eq("organization", org);
+    if (!profiles) { setLoading(false); return; }
+    setMembers(profiles);
+    const uids = profiles.map(p=>p.id);
+    // Get all purchases from org members
+    const { data:pData } = await supabase.from("purchases")
+      .select("*")
+      .in("user_id", uids)
+      .order("date", { ascending:false })
+      .limit(500);
+    if (pData) {
+      // Attach member name to each purchase
+      const nameMap = Object.fromEntries(profiles.map(p=>[p.id, p.full_name||"Unknown"]));
+      setTeamPurchases(pData.map(p=>({ ...p, price:Number(p.price), qty:Number(p.qty), memberName:nameMap[p.user_id]||"Unknown" })));
+    }
+    setLoading(false);
+    setLastRefresh(new Date());
+  };
+
+  useEffect(()=>{ load(); },[session, org]);
+
+  const memberOpts = useMemo(()=>["All",...members.map(m=>m.full_name||m.id)],[members]);
+  const catOpts    = useMemo(()=>["All",...new Set(teamPurchases.map(p=>p.category))],[teamPurchases]);
+
+  const filtered = useMemo(()=>{
+    let rows = teamPurchases;
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      rows = rows.filter(p=> p.item.toLowerCase().includes(q) || p.vendor.toLowerCase().includes(q) || p.memberName.toLowerCase().includes(q));
+    }
+    if (filterMember!=="All") rows = rows.filter(p=>p.memberName===filterMember);
+    if (filterCat!=="All")    rows = rows.filter(p=>p.category===filterCat);
+    return rows;
+  },[teamPurchases, search, filterMember, filterCat]);
+
+  const totalSpend   = filtered.reduce((s,p)=>s+p.qty*p.price, 0);
+  const memberSpends = useMemo(()=>{
+    const m={};
+    filtered.forEach(p=>{ m[p.memberName]=(m[p.memberName]||0)+p.qty*p.price; });
+    return Object.entries(m).sort((a,b)=>b[1]-a[1]);
+  },[filtered]);
+
+  if (!org) return (
+    <div style={{textAlign:"center",padding:"80px 20px"}}>
+      <div style={{fontSize:48,marginBottom:16}}>👥</div>
+      <h2 style={{fontSize:20,fontWeight:800,color:T.t1,marginBottom:10}}>Team Purchasing</h2>
+      <p style={{fontSize:14,color:T.t2,maxWidth:420,margin:"0 auto 24px",lineHeight:1.7}}>
+        Set your <strong style={{color:T.t1}}>Organization</strong> in Settings to see purchases from your teammates in the same org.
+      </p>
+      <Badge color={T.amber} s={{fontSize:13,padding:"8px 18px"}}>⚙️ Go to Settings → set Organization name</Badge>
+    </div>
+  );
+
+  return (
+    <div className="fade-up">
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:20,flexWrap:"wrap",gap:12}}>
+        <div>
+          <h1 style={{fontSize:22,fontWeight:800,color:T.t1,letterSpacing:"-0.02em"}}>Team View</h1>
+          <p style={{fontSize:13,color:T.t2,marginTop:3}}>
+            Shared purchases · <span style={{color:T.teal,fontWeight:600}}>{org}</span>
+            {lastRefresh&&<span style={{color:T.t3,marginLeft:6}}>· {lastRefresh.toLocaleTimeString()}</span>}
+          </p>
+        </div>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          <div style={{display:"flex",background:"#070f1c",border:`1px solid ${T.border}`,borderRadius:9,overflow:"hidden"}}>
+            {[["feed","📋 Feed"],["table","☰ Table"]].map(([m,lbl])=>(
+              <button key={m} onClick={()=>setViewMode(m)}
+                style={{border:"none",padding:"8px 14px",fontSize:12,fontWeight:600,cursor:"pointer",transition:"all 0.15s",
+                  background:viewMode===m?T.teal:"transparent",color:viewMode===m?"#fff":T.t3}}>{lbl}</button>
+            ))}
+          </div>
+          <Btn v="ghost" onClick={load} disabled={loading} s={{fontSize:12}}>↻ Refresh</Btn>
+        </div>
+      </div>
+
+      {loading ? (
+        <div style={{textAlign:"center",padding:"80px",color:T.t3}}>
+          <div className="spin" style={{width:28,height:28,border:`2px solid ${T.border}`,borderTopColor:T.teal,borderRadius:"50%",margin:"0 auto 10px"}}/>
+          Loading team data…
+        </div>
+      ) : (
+        <>
+          {/* KPI row */}
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))",gap:12,marginBottom:20}}>
+            {[
+              {l:"Total Spend",   v:fmt(totalSpend),         c:T.teal},
+              {l:"Transactions",  v:filtered.length,          c:T.purple},
+              {l:"Team Members",  v:members.length,           c:T.amber},
+              {l:"Active Vendors",v:new Set(filtered.map(p=>p.vendor)).size, c:T.green},
+            ].map(x=>(
+              <Card key={x.l} s={{padding:"14px 16px",borderTop:`2px solid ${x.c}`}}>
+                <div style={{fontSize:9,fontWeight:700,color:x.c,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:6}}>{x.l}</div>
+                <div style={{fontSize:18,fontWeight:800,color:T.t1,fontFamily:T.mono}}>{x.v}</div>
+              </Card>
+            ))}
+          </div>
+
+          {/* Member spend breakdown */}
+          {memberSpends.length > 1 && (
+            <Card s={{marginBottom:20,padding:"16px 20px"}}>
+              <div style={{fontSize:13,fontWeight:700,color:T.t1,marginBottom:14}}>Member Spending</div>
+              <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                {memberSpends.map(([name,spend],i)=>(
+                  <div key={name} style={{display:"flex",alignItems:"center",gap:10}}>
+                    <div style={{width:28,height:28,borderRadius:8,background:`linear-gradient(135deg,${COLORS[i%COLORS.length]},${T.purple})`,
+                      display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:800,color:"#fff",flexShrink:0}}>
+                      {name.split(" ").map(w=>w[0]).join("").slice(0,2).toUpperCase()}
+                    </div>
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
+                        <span style={{fontSize:12,fontWeight:600,color:T.t1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{name}</span>
+                        <span style={{fontSize:12,fontWeight:700,color:COLORS[i%COLORS.length],fontFamily:T.mono,flexShrink:0,marginLeft:8}}>{fmt(spend)}</span>
+                      </div>
+                      <div style={{height:4,background:"#0a1628",borderRadius:99}}>
+                        <div style={{height:"100%",width:`${totalSpend>0?(spend/totalSpend)*100:0}%`,background:COLORS[i%COLORS.length],borderRadius:99,transition:"width 0.7s"}}/>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          )}
+
+          {/* Toolbar */}
+          <div style={{display:"flex",gap:10,marginBottom:14,flexWrap:"wrap",alignItems:"center"}}>
+            <div style={{flex:"1 1 180px",position:"relative"}}>
+              <span style={{position:"absolute",left:10,top:"50%",transform:"translateY(-50%)",fontSize:13,color:T.t3,pointerEvents:"none"}}>🔍</span>
+              <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search item, vendor, member…"
+                style={{background:"#070f1c",border:`1.5px solid ${search?T.teal:T.border}`,borderRadius:9,
+                  padding:"10px 12px 10px 32px",color:T.t1,fontSize:13,outline:"none",width:"100%"}}
+                onFocus={e=>e.target.style.borderColor=T.teal} onBlur={e=>e.target.style.borderColor=search?T.teal:T.border}/>
+            </div>
+            <select value={filterMember} onChange={e=>setFilterMember(e.target.value)}
+              style={{background:"#070f1c",border:`1.5px solid ${filterMember!=="All"?T.teal:T.border}`,borderRadius:9,
+                padding:"10px 12px",color:filterMember!=="All"?T.teal:T.t1,fontSize:13,outline:"none",cursor:"pointer",flexShrink:0}}>
+              {memberOpts.map(o=><option key={o} value={o} style={{background:"#070f1c"}}>{o==="All"?"All Members":o}</option>)}
+            </select>
+            <select value={filterCat} onChange={e=>setFilterCat(e.target.value)}
+              style={{background:"#070f1c",border:`1.5px solid ${filterCat!=="All"?T.purple:T.border}`,borderRadius:9,
+                padding:"10px 12px",color:filterCat!=="All"?T.purple:T.t1,fontSize:13,outline:"none",cursor:"pointer",flexShrink:0}}>
+              {catOpts.map(o=><option key={o} value={o} style={{background:"#070f1c"}}>{o==="All"?"All Categories":o}</option>)}
+            </select>
+            {(search||filterMember!=="All"||filterCat!=="All") && (
+              <button onClick={()=>{setSearch("");setFilterMember("All");setFilterCat("All");}}
+                style={{border:`1px solid ${T.border}`,borderRadius:9,padding:"9px 14px",fontSize:12,background:"transparent",color:T.t2,cursor:"pointer"}}>✕ Clear</button>
+            )}
+            <Btn v="outline" s={{fontSize:12}} onClick={()=>{
+              const rows = filtered.map(p=>({Date:p.date,Member:p.memberName,Vendor:p.vendor,Item:p.item,Category:p.category,Qty:p.qty,"Price (Mwk)":p.price,"Total (Mwk)":p.qty*p.price}));
+              exportCSV(rows, `TeamPurchases_${org}_${today()}.csv`);
+            }}>⬇ Export CSV</Btn>
+          </div>
+
+          {/* ── FEED VIEW ── */}
+          {viewMode==="feed" && (
+            <div style={{display:"flex",flexDirection:"column",gap:10}}>
+              {filtered.length===0 ? (
+                <div style={{textAlign:"center",padding:"60px",color:T.t3}}>No purchases found.</div>
+              ) : filtered.map((p,i)=>{
+                const memberIdx = members.findIndex(m=>(m.full_name||m.id)===p.memberName);
+                const color = COLORS[Math.max(memberIdx,0)%COLORS.length];
+                return (
+                  <div key={p.id||i} style={{background:T.cardBg,border:`1px solid ${T.border}`,borderRadius:12,padding:"14px 18px",
+                    display:"flex",gap:14,alignItems:"flex-start",flexWrap:"wrap"}}>
+                    <div style={{width:36,height:36,borderRadius:10,background:`linear-gradient(135deg,${color},${T.purple})`,
+                      display:"flex",alignItems:"center",justifyContent:"center",fontSize:13,fontWeight:800,color:"#fff",flexShrink:0}}>
+                      {p.memberName.split(" ").map(w=>w[0]).join("").slice(0,2).toUpperCase()}
+                    </div>
+                    <div style={{flex:1,minWidth:180}}>
+                      <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:4,flexWrap:"wrap"}}>
+                        <span style={{fontSize:13,fontWeight:700,color:T.t1}}>{p.item}</span>
+                        <Badge color={T.purple} s={{fontSize:9}}>{p.category}</Badge>
+                      </div>
+                      <div style={{fontSize:12,color:T.t2}}>{p.vendor} · <span style={{fontFamily:T.mono}}>{p.qty} units × {fmt(p.price)}</span></div>
+                      <div style={{fontSize:11,color:T.t3,marginTop:3}}>by <span style={{color,fontWeight:600}}>{p.memberName}</span> · {p.date}</div>
+                    </div>
+                    <div style={{fontWeight:800,color:T.teal,fontFamily:T.mono,fontSize:15,flexShrink:0}}>{fmt(p.qty*p.price)}</div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {/* ── TABLE VIEW ── */}
+          {viewMode==="table" && (
+            <Card s={{padding:0,overflow:"hidden"}}>
+              <div style={{overflowX:"auto"}}>
+                <table style={{width:"100%",borderCollapse:"collapse",fontSize:13}}>
+                  <thead><tr>
+                    <Th>Date</Th><Th>Member</Th><Th>Vendor</Th><Th>Item</Th><Th>Category</Th>
+                    <Th right>Qty</Th><Th right>Unit Price</Th><Th right>Total</Th>
+                  </tr></thead>
+                  <tbody>
+                    {filtered.length===0
+                      ? <tr><td colSpan={8} style={{padding:"40px",textAlign:"center",color:T.t3}}>No records found.</td></tr>
+                      : filtered.map((p,i)=>(
+                        <tr key={p.id||i} onMouseEnter={e=>e.currentTarget.style.background="#0f2236"} onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                          <Td><span style={{fontFamily:T.mono,fontSize:11}}>{p.date}</span></Td>
+                          <Td><Badge color={COLORS[Math.max(members.findIndex(m=>(m.full_name||m.id)===p.memberName),0)%COLORS.length]} s={{fontSize:10}}>{p.memberName}</Badge></Td>
+                          <Td bold>{p.vendor}</Td>
+                          <Td>{p.item}</Td>
+                          <Td><Badge color={T.purple} s={{fontSize:10}}>{p.category}</Badge></Td>
+                          <Td right mono>{p.qty}</Td>
+                          <Td right mono>{fmt(p.price)}</Td>
+                          <Td right mono bold color={T.teal}>{fmt(p.qty*p.price)}</Td>
+                        </tr>
+                      ))
+                    }
+                    {filtered.length>0 && (
+                      <tr style={{background:"#070f1c"}}>
+                        <td colSpan={7} style={{padding:"10px 14px",textAlign:"right",fontWeight:700,color:T.t2,fontSize:12}}>Team Total</td>
+                        <td style={{padding:"10px 14px",textAlign:"right",fontWeight:800,color:T.purple,fontFamily:T.mono,fontSize:14}}>{fmt(totalSpend)}</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   PAGE: MARKET PRICES
+══════════════════════════════════════════════════════════════════════════ */
   const [marketData, setMarketData] = useState([]);
   const [loading,    setLoading]    = useState(true);
   const [lastRefresh, setLastRefresh] = useState(null);
@@ -3867,12 +4455,23 @@ export default function App() {
   // ── Data state (replaces INITIAL_PURCHASES / INITIAL_VENDORS) ──
   const [purchases,    setPurchases]    = useState([]);
   const [vendors,      setVendors]      = useState([]);
-  const [catalogItems, setCatalogItems] = useState([]); // manually curated catalog entries
+  const [catalogItems, setCatalogItems] = useState([]);
   const [profile,      setProfileState] = useState(null);
   const [dataLoading,  setDataLoading]  = useState(false);
   const [newPurchaseOpen, setNewPurchaseOpen] = useState(false);
   const [addVendorOpen,   setAddVendorOpen]   = useState(false);
   const [vendorFilters,   setVendorFilters]   = useState({ search:"", cat:"All", sort:"name", view:"grid" });
+  const [marketDataForAlerts, setMarketDataForAlerts] = useState([]);
+
+  // Compute price alerts whenever purchases or market data changes
+  const priceAlerts = useMemo(()=>calcPriceAlerts(purchases, marketDataForAlerts, 0.10),[purchases, marketDataForAlerts]);
+
+  // Fetch market data for price alert computation (background, once per session)
+  useEffect(()=>{
+    if (!session) return;
+    supabase.from("purchases").select("item,vendor,price,date").order("date",{ascending:false}).limit(3000)
+      .then(({data})=>{ if(data) setMarketDataForAlerts(data.map(r=>({...r,price:Number(r.price)}))); });
+  },[session]);
 
   // ── Auth listener ──
   useEffect(()=>{
@@ -4078,6 +4677,7 @@ export default function App() {
     { id:"home",      icon:"🏠", label:"Home" },
     { id:"purchases", icon:"🛒", label:"Purchases" },
     { id:"vendors",   icon:"🏭", label:"Vendors" },
+    { id:"team",      icon:"👥", label:"Team" },
     { id:"insights",  icon:"📊", label:"Insights" },
     { id:"reports",   icon:"📋", label:"Reports" },
     { id:"catalog",   icon:"📖", label:"Catalog" },
@@ -4089,7 +4689,7 @@ export default function App() {
   const BOTTOM_NAV = [
     { id:"home",      icon:"🏠", label:"Home" },
     { id:"purchases", icon:"🛒", label:"Purchases" },
-    { id:"catalog",   icon:"📖", label:"Catalog" },
+    { id:"team",      icon:"👥", label:"Team" },
     { id:"vendors",   icon:"🏭", label:"Vendors" },
     { id:"more",      icon:"☰",  label:"More" },
   ];
@@ -4199,6 +4799,7 @@ export default function App() {
         )}
 
         {page==="home"      && <Home purchases={purchases} vendors={vendors} go={navigateTo} profile={prof}
+            priceAlerts={priceAlerts}
             openNewPurchase={()=>{ navigateTo("purchases"); setNewPurchaseOpen(true); }}
             openAddVendor={()=>{ navigateTo("vendors"); setAddVendorOpen(true); }}/>}
         {page==="purchases" && <Purchases purchases={purchases} setPurchases={setPurchases}
@@ -4210,6 +4811,7 @@ export default function App() {
             addVendorDB={addVendorDB} deleteVendorDB={deleteVendorDB} updateVendorDB={updateVendorDB}
             triggerAdd={addVendorOpen} clearTriggerAdd={()=>setAddVendorOpen(false)}
             savedFilters={vendorFilters} onFiltersChange={saveVendorFilters}/>}
+        {page==="team"      && <TeamView session={session} profile={prof}/>}
         {page==="insights"  && <Insights purchases={purchases}/>}
         {page==="reports"   && <Reports purchases={purchases} vendors={vendors} session={session} isAdmin={prof.isAdmin}/>}
         {page==="catalog"   && <Catalog purchases={purchases} vendors={vendors}
