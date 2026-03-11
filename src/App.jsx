@@ -4237,11 +4237,23 @@ function MarketCatalog({ purchases, vendors=[], guestMode=false }) {
    LANDING PAGE  (shown to unauthenticated visitors)
 ══════════════════════════════════════════════════════════════════════════ */
 function LandingPage({ onLogin }) {
-  const [view, setView] = useState("hero"); // "hero" | "auth"
+  const [view, setView] = useState("hero"); // "hero" | "catalog" | "auth"
+  const [marketData, setMarketData] = useState([]);
+  const [mktLoading, setMktLoading] = useState(false);
   const [animating, setAnimating] = useState(false);
 
   const switchTo = (to) => {
     if (to === view || animating) return;
+    // Lazy-load market data the first time catalog is opened
+    if (to === "catalog" && marketData.length === 0) {
+      setMktLoading(true);
+      supabase.from("purchases").select("item,vendor,category,price,date")
+        .order("date",{ascending:false})
+        .then(({data})=>{
+          if(data) setMarketData(data.map(r=>({...r,price:Number(r.price)})));
+          setMktLoading(false);
+        });
+    }
     setAnimating(true);
     setTimeout(() => { setView(to); setAnimating(false); }, 200);
   };
@@ -4254,14 +4266,15 @@ function LandingPage({ onLogin }) {
 
   return (
     <div style={{
-      height: "100vh", width: "100vw", overflow: "hidden",
+      height: "100vh", width: "100vw",
+      overflow: view === "catalog" ? "auto" : "hidden",
       position: "fixed", top: 0, left: 0,
       background: T.mainBg, fontFamily: "'Sora', sans-serif",
       display: "flex", flexDirection: "column",
     }}>
       <GS/>
 
-      {/* ── Texture overlay — subtle noise/grain on dark bg ── */}
+      {/* ── Texture overlay ── */}
       <div style={{
         position: "fixed", inset: 0, zIndex: 0, pointerEvents: "none",
         backgroundImage: `
@@ -4270,104 +4283,166 @@ function LandingPage({ onLogin }) {
           radial-gradient(ellipse 40% 40% at 50% 10%, rgba(15,184,164,0.06) 0%, transparent 70%)
         `,
       }}/>
-      {/* SVG noise texture */}
       <svg style={{position:"fixed",inset:0,width:"100%",height:"100%",zIndex:0,pointerEvents:"none",opacity:0.035}} xmlns="http://www.w3.org/2000/svg">
         <filter id="noise"><feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" stitchTiles="stitch"/><feColorMatrix type="saturate" values="0"/></filter>
         <rect width="100%" height="100%" filter="url(#noise)"/>
       </svg>
 
-      {/* ── Top-left logo ── */}
+      {/* ── Top bar — always visible ── */}
       <div style={{
-        position: "fixed", top: 0, left: 0, right: 0, zIndex: 10,
-        padding: "18px 24px", display: "flex", alignItems: "center",
+        position: view==="catalog" ? "sticky" : "fixed",
+        top: 0, left: 0, right: 0, zIndex: 10,
+        padding: "14px 20px",
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        background: view==="catalog" ? `${T.mainBg}f8` : "transparent",
+        backdropFilter: view==="catalog" ? "blur(16px)" : "none",
+        borderBottom: view==="catalog" ? `1px solid ${T.border}` : "none",
       }}>
-        <div style={{display:"flex",alignItems:"center",gap:9}}>
-          <div style={{width:32,height:32,borderRadius:9,
-            background:`linear-gradient(135deg,${T.teal},${T.purple})`,
-            display:"flex",alignItems:"center",justifyContent:"center",fontSize:15}}>🛒</div>
-          <div style={{fontSize:15,fontWeight:800,color:T.t1,letterSpacing:"-0.02em"}}>ProcureDesk</div>
+        {/* Logo */}
+        <div style={{display:"flex",alignItems:"center",gap:9,cursor:"pointer"}} onClick={()=>switchTo("hero")}>
+          <div style={{width:30,height:30,borderRadius:8,background:`linear-gradient(135deg,${T.teal},${T.purple})`,
+            display:"flex",alignItems:"center",justifyContent:"center",fontSize:14}}>🛒</div>
+          <div style={{fontSize:14,fontWeight:800,color:T.t1,letterSpacing:"-0.02em"}}>ProcureDesk</div>
+        </div>
+        {/* Nav actions */}
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          {view !== "catalog" && (
+            <button onClick={()=>switchTo("catalog")}
+              style={{border:`1px solid rgba(255,255,255,0.14)`,borderRadius:99,padding:"7px 16px",
+                fontSize:12,fontWeight:600,background:"rgba(255,255,255,0.05)",
+                color:"rgba(220,240,255,0.7)",cursor:"pointer",transition:"all 0.15s"}}
+              onMouseEnter={e=>{e.currentTarget.style.background="rgba(255,255,255,0.10)";e.currentTarget.style.color="#fff";}}
+              onMouseLeave={e=>{e.currentTarget.style.background="rgba(255,255,255,0.05)";e.currentTarget.style.color="rgba(220,240,255,0.7)";}}>
+              Market
+            </button>
+          )}
+          {view === "catalog" && (
+            <button onClick={()=>switchTo("hero")}
+              style={{background:"none",border:"none",color:T.t2,fontSize:12,cursor:"pointer",padding:"6px 4px",fontFamily:"inherit"}}>
+              ← Back
+            </button>
+          )}
+          <button onClick={()=>switchTo("auth")}
+            style={{border:"none",borderRadius:99,padding:"8px 18px",fontSize:12,fontWeight:700,
+              background:`linear-gradient(135deg,${T.teal},${T.tealDim})`,
+              color:"#fff",cursor:"pointer",boxShadow:`0 3px 12px ${T.tealGlow}`,transition:"transform 0.15s"}}
+            onMouseEnter={e=>e.currentTarget.style.transform="scale(1.04)"}
+            onMouseLeave={e=>e.currentTarget.style.transform="scale(1)"}>
+            Sign In →
+          </button>
         </div>
       </div>
 
       {/* ── Centre content ── */}
       <div style={{
         position: "relative", zIndex: 1, flex: 1,
-        display: "flex", alignItems: "center", justifyContent: "center",
-        padding: "20px",
+        display: view === "catalog" ? "block" : "flex",
+        alignItems: "center", justifyContent: "center",
+        padding: view === "catalog" ? "24px 16px 60px" : "80px 20px 20px",
+        maxWidth: view === "catalog" ? 1100 : "none",
+        margin: view === "catalog" ? "0 auto" : "0",
+        width: "100%",
       }}>
 
         {/* ══ HERO ══ */}
         {view === "hero" && (
-          <div style={{textAlign:"center", maxWidth:580, width:"100%", ...fade}}>
+          <div style={{textAlign:"center", maxWidth:540, width:"100%", ...fade}}>
             <h1 style={{
-              fontSize: "clamp(32px,7vw,58px)",
+              fontSize: "clamp(24px,6vw,52px)",
               fontWeight: 800,
               color: "#ffffff",
               letterSpacing: "-0.03em",
               lineHeight: 1.1,
-              marginBottom: 20,
+              marginBottom: 16,
             }}>
               Real Prices.<br/>Smarter Buying.
             </h1>
 
             <p style={{
-              fontSize: "clamp(13px,2.5vw,16px)",
-              color: "rgba(180,210,235,0.75)",
-              lineHeight: 1.75,
-              marginBottom: 40,
-              maxWidth: 460,
-              margin: "0 auto 40px",
+              fontSize: "clamp(12px,2.2vw,15px)",
+              color: "rgba(180,210,235,0.72)",
+              lineHeight: 1.7,
+              maxWidth: 420,
+              margin: "0 auto 32px",
             }}>
               Browse live procurement prices from businesses across the region.
               Compare suppliers, spot the best deals, and make smarter
               purchasing decisions — before you spend a kwacha.
             </p>
 
-            <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:14}}>
-              {/* Primary CTA */}
+            <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:12}}>
+              {/* Primary — opens catalog */}
               <button
-                onClick={()=>switchTo("auth")}
+                onClick={()=>switchTo("catalog")}
                 style={{
-                  border: "none",
-                  borderRadius: 99,
-                  padding: "14px 36px",
-                  fontSize: 15,
+                  border: "none", borderRadius: 99,
+                  padding: "13px 34px",
+                  fontSize: "clamp(13px,2vw,15px)",
                   fontWeight: 700,
-                  background: `linear-gradient(135deg, ${T.teal}, ${T.tealDim})`,
-                  color: "#fff",
-                  cursor: "pointer",
+                  background: `linear-gradient(135deg,${T.teal},${T.tealDim})`,
+                  color: "#fff", cursor: "pointer",
                   letterSpacing: "-0.01em",
-                  boxShadow: `0 0 32px ${T.tealGlow}, 0 4px 16px rgba(0,0,0,0.3)`,
+                  boxShadow: `0 0 28px ${T.tealGlow}, 0 4px 14px rgba(0,0,0,0.3)`,
                   transition: "transform 0.15s, box-shadow 0.15s",
-                  minWidth: 220,
+                  minWidth: 200,
                 }}
-                onMouseEnter={e=>{ e.currentTarget.style.transform="scale(1.04)"; e.currentTarget.style.boxShadow=`0 0 44px ${T.tealGlow}, 0 6px 20px rgba(0,0,0,0.4)`; }}
-                onMouseLeave={e=>{ e.currentTarget.style.transform="scale(1)"; e.currentTarget.style.boxShadow=`0 0 32px ${T.tealGlow}, 0 4px 16px rgba(0,0,0,0.3)`; }}
+                onMouseEnter={e=>{ e.currentTarget.style.transform="scale(1.04)"; e.currentTarget.style.boxShadow=`0 0 40px ${T.tealGlow}, 0 6px 18px rgba(0,0,0,0.4)`; }}
+                onMouseLeave={e=>{ e.currentTarget.style.transform="scale(1)";   e.currentTarget.style.boxShadow=`0 0 28px ${T.tealGlow}, 0 4px 14px rgba(0,0,0,0.3)`; }}
               >
                 Explore The Market →
               </button>
 
-              {/* Secondary CTA */}
+              {/* Secondary — opens auth */}
               <button
                 onClick={()=>switchTo("auth")}
                 style={{
-                  border: "1.5px solid rgba(255,255,255,0.18)",
+                  border: "1.5px solid rgba(255,255,255,0.16)",
                   borderRadius: 99,
-                  padding: "12px 36px",
-                  fontSize: 14,
+                  padding: "11px 34px",
+                  fontSize: "clamp(12px,1.8vw,14px)",
                   fontWeight: 600,
                   background: "rgba(255,255,255,0.05)",
-                  color: "rgba(220,240,255,0.85)",
+                  color: "rgba(220,240,255,0.82)",
                   cursor: "pointer",
                   backdropFilter: "blur(8px)",
-                  letterSpacing: "-0.01em",
                   transition: "all 0.15s",
-                  minWidth: 220,
+                  minWidth: 200,
                 }}
-                onMouseEnter={e=>{ e.currentTarget.style.background="rgba(255,255,255,0.10)"; e.currentTarget.style.borderColor="rgba(255,255,255,0.30)"; }}
-                onMouseLeave={e=>{ e.currentTarget.style.background="rgba(255,255,255,0.05)"; e.currentTarget.style.borderColor="rgba(255,255,255,0.18)"; }}
+                onMouseEnter={e=>{ e.currentTarget.style.background="rgba(255,255,255,0.10)"; e.currentTarget.style.borderColor="rgba(255,255,255,0.28)"; }}
+                onMouseLeave={e=>{ e.currentTarget.style.background="rgba(255,255,255,0.05)"; e.currentTarget.style.borderColor="rgba(255,255,255,0.16)"; }}
               >
                 Sign In →
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ══ MARKET CATALOG ══ */}
+        {view === "catalog" && (
+          <div style={fade}>
+            <div style={{marginBottom:20}}>
+              <h2 style={{fontSize:"clamp(16px,3vw,22px)",fontWeight:800,color:T.t1,marginBottom:4}}>Market Catalog</h2>
+              <p style={{fontSize:12,color:T.t3}}>Community-sourced · Anonymous · Updated live</p>
+            </div>
+            {mktLoading
+              ? <div style={{textAlign:"center",padding:"80px",color:T.t3}}>
+                  <div className="spin" style={{width:28,height:28,border:`2px solid ${T.border}`,borderTopColor:T.teal,borderRadius:"50%",margin:"0 auto 10px"}}/>
+                  Loading market data…
+                </div>
+              : <MarketCatalog purchases={marketData} guestMode/>
+            }
+            {/* Bottom CTA */}
+            <div style={{marginTop:48,textAlign:"center",padding:"32px 20px",background:T.cardBg,borderRadius:16,border:`1px solid ${T.border}`}}>
+              <div style={{fontSize:22,marginBottom:10}}>📊</div>
+              <div style={{fontSize:16,fontWeight:800,color:T.t1,marginBottom:8}}>Track your own procurement</div>
+              <p style={{fontSize:13,color:T.t2,marginBottom:20,lineHeight:1.6,maxWidth:380,margin:"0 auto 20px"}}>
+                Sign up free to log purchases, manage suppliers and generate reports.
+              </p>
+              <button onClick={()=>switchTo("auth")}
+                style={{border:"none",borderRadius:99,padding:"12px 28px",fontSize:14,fontWeight:700,
+                  background:`linear-gradient(135deg,${T.teal},${T.purple})`,color:"#fff",cursor:"pointer",
+                  boxShadow:`0 4px 16px ${T.tealGlow}`}}>
+                Create Free Account →
               </button>
             </div>
           </div>
@@ -4380,7 +4455,7 @@ function LandingPage({ onLogin }) {
               onClick={()=>switchTo("hero")}
               style={{background:"none",border:"none",color:"rgba(180,210,235,0.6)",fontSize:13,
                 cursor:"pointer",marginBottom:24,display:"flex",alignItems:"center",gap:6,padding:0,
-                transition:"color 0.15s"}}
+                fontFamily:"inherit",transition:"color 0.15s"}}
               onMouseEnter={e=>e.currentTarget.style.color=T.teal}
               onMouseLeave={e=>e.currentTarget.style.color="rgba(180,210,235,0.6)"}
             >
