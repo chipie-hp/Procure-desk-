@@ -4237,158 +4237,156 @@ function MarketCatalog({ purchases, vendors=[], guestMode=false }) {
    LANDING PAGE  (shown to unauthenticated visitors)
 ══════════════════════════════════════════════════════════════════════════ */
 function LandingPage({ onLogin }) {
-  const [marketData, setMarketData] = useState([]);
-  const [loading,    setLoading]    = useState(true);
-  const [view,       setView]       = useState("catalog"); // "catalog" | "auth"
-  const [animating,  setAnimating]  = useState(false);
-  const [statsCount, setStatsCount] = useState({ items:0, suppliers:0, entries:0 });
+  const [view, setView] = useState("hero"); // "hero" | "auth"
+  const [animating, setAnimating] = useState(false);
 
-  useEffect(()=>{
-    supabase.from("purchases").select("item,vendor,category,price,date").order("date",{ascending:false})
-      .then(({ data })=>{
-        if(data) {
-          const d = data.map(r=>({...r,price:Number(r.price)}));
-          setMarketData(d);
-          const items = new Set(d.map(x=>x.item.toLowerCase())).size;
-          const suppliers = new Set(d.map(x=>x.vendor.toLowerCase())).size;
-          setStatsCount({ items, suppliers, entries: d.length });
-        }
-        setLoading(false);
-      });
-  },[]);
-
-  const switchView = (to) => {
-    if (to===view||animating) return;
+  const switchTo = (to) => {
+    if (to === view || animating) return;
     setAnimating(true);
-    setTimeout(()=>{ setView(to); setAnimating(false); }, 220);
+    setTimeout(() => { setView(to); setAnimating(false); }, 200);
   };
 
-  const fadeStyle = {
+  const fade = {
     opacity: animating ? 0 : 1,
-    transform: animating ? "translateY(8px)" : "translateY(0)",
-    transition: "opacity 0.22s ease, transform 0.22s ease",
+    transform: animating ? "translateY(12px)" : "translateY(0)",
+    transition: "opacity 0.2s ease, transform 0.2s ease",
   };
 
   return (
-    <div style={{minHeight:"100vh",background:T.mainBg,fontFamily:"'Sora',sans-serif",overflowY:"auto",overflowX:"hidden"}}>
+    <div style={{
+      height: "100vh", width: "100vw", overflow: "hidden",
+      position: "fixed", top: 0, left: 0,
+      background: T.mainBg, fontFamily: "'Sora', sans-serif",
+      display: "flex", flexDirection: "column",
+    }}>
       <GS/>
 
-      {/* bg glows */}
-      <div style={{position:"fixed",inset:0,pointerEvents:"none",overflow:"hidden",zIndex:0}}>
-        <div style={{position:"absolute",top:"-10%",left:"-10%",width:"min(700px,90vw)",height:"min(700px,90vw)",background:`radial-gradient(circle,${T.tealGlow} 0%,transparent 65%)`,borderRadius:"50%"}}/>
-        <div style={{position:"absolute",bottom:"-15%",right:"-10%",width:"min(600px,80vw)",height:"min(600px,80vw)",background:`radial-gradient(circle,${T.purpleGlow} 0%,transparent 65%)`,borderRadius:"50%"}}/>
-      </div>
+      {/* ── Texture overlay — subtle noise/grain on dark bg ── */}
+      <div style={{
+        position: "fixed", inset: 0, zIndex: 0, pointerEvents: "none",
+        backgroundImage: `
+          radial-gradient(ellipse 80% 60% at 20% 30%, rgba(15,184,164,0.10) 0%, transparent 60%),
+          radial-gradient(ellipse 60% 70% at 80% 70%, rgba(123,94,167,0.12) 0%, transparent 60%),
+          radial-gradient(ellipse 40% 40% at 50% 10%, rgba(15,184,164,0.06) 0%, transparent 70%)
+        `,
+      }}/>
+      {/* SVG noise texture */}
+      <svg style={{position:"fixed",inset:0,width:"100%",height:"100%",zIndex:0,pointerEvents:"none",opacity:0.035}} xmlns="http://www.w3.org/2000/svg">
+        <filter id="noise"><feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="3" stitchTiles="stitch"/><feColorMatrix type="saturate" values="0"/></filter>
+        <rect width="100%" height="100%" filter="url(#noise)"/>
+      </svg>
 
-      {/* ── Sticky Navbar ── */}
-      <div style={{position:"sticky",top:0,zIndex:100,background:`${T.mainBg}f0`,backdropFilter:"blur(16px)",
-        borderBottom:`1px solid ${T.border}`,padding:"12px 20px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+      {/* ── Top-left logo ── */}
+      <div style={{
+        position: "fixed", top: 0, left: 0, right: 0, zIndex: 10,
+        padding: "18px 24px", display: "flex", alignItems: "center",
+      }}>
         <div style={{display:"flex",alignItems:"center",gap:9}}>
-          <div style={{width:32,height:32,borderRadius:9,background:`linear-gradient(135deg,${T.teal},${T.purple})`,
+          <div style={{width:32,height:32,borderRadius:9,
+            background:`linear-gradient(135deg,${T.teal},${T.purple})`,
             display:"flex",alignItems:"center",justifyContent:"center",fontSize:15}}>🛒</div>
           <div style={{fontSize:15,fontWeight:800,color:T.t1,letterSpacing:"-0.02em"}}>ProcureDesk</div>
         </div>
-        <div style={{display:"flex",gap:8,alignItems:"center"}}>
-          <button onClick={()=>switchView("catalog")}
-            style={{border:`1.5px solid ${view==="catalog"?T.teal:T.border}`,borderRadius:9,padding:"7px 14px",
-              fontSize:13,fontWeight:600,background:view==="catalog"?`${T.teal}15`:"transparent",
-              color:view==="catalog"?T.teal:T.t2,cursor:"pointer",transition:"all 0.2s"}}>
-            📖 Market
-          </button>
-          <button onClick={()=>switchView("auth")}
-            style={{border:"none",borderRadius:9,padding:"8px 18px",fontSize:13,fontWeight:700,
-              background:`linear-gradient(135deg,${T.teal},${T.tealDim})`,
-              color:"#fff",cursor:"pointer",boxShadow:view==="catalog"?`0 4px 14px ${T.tealGlow}`:"none"}}>
-            Sign In →
-          </button>
-        </div>
       </div>
 
-      {/* ── Content ── */}
-      <div style={{position:"relative",zIndex:1,...fadeStyle}}>
+      {/* ── Centre content ── */}
+      <div style={{
+        position: "relative", zIndex: 1, flex: 1,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        padding: "20px",
+      }}>
 
-        {/* ══ CATALOG VIEW ══ */}
-        {view==="catalog" && (
-          <div>
-            {/* Hero */}
-            <div style={{textAlign:"center",padding:"40px 20px 32px",maxWidth:560,margin:"0 auto"}}>
-              <div style={{display:"inline-flex",alignItems:"center",gap:6,background:`${T.teal}15`,
-                border:`1px solid ${T.teal}30`,borderRadius:99,padding:"5px 14px",marginBottom:18}}>
-                <span style={{width:6,height:6,borderRadius:"50%",background:T.teal,display:"inline-block",animation:"pulse 1.5s infinite"}}/>
-                <span style={{fontSize:11,fontWeight:700,color:T.teal,letterSpacing:"0.08em"}}>LIVE MARKET PRICES</span>
-              </div>
-              <h1 style={{fontSize:"clamp(26px,6vw,42px)",fontWeight:800,color:T.t1,letterSpacing:"-0.03em",lineHeight:1.15,marginBottom:14}}>
-                Real Prices.<br/><span style={{color:T.teal}}>Smarter Buying.</span>
-              </h1>
-              <p style={{fontSize:"clamp(13px,3.5vw,15px)",color:T.t2,lineHeight:1.7,marginBottom:24}}>
-                Browse live procurement prices from businesses across the region. Compare suppliers, spot the best deals, and make smarter purchasing decisions — before you spend a kwacha.
-              </p>
-              {/* Live stats */}
-              <div style={{display:"flex",gap:12,justifyContent:"center",flexWrap:"wrap",marginBottom:28}}>
-                {[
-                  {n:loading?"…":statsCount.items,   l:"Unique Items"},
-                  {n:loading?"…":statsCount.suppliers, l:"Suppliers"},
-                  {n:loading?"…":statsCount.entries,  l:"Price Entries"},
-                ].map(s=>(
-                  <div key={s.l} style={{background:`${T.teal}10`,border:`1px solid ${T.teal}25`,borderRadius:12,padding:"10px 20px",minWidth:90}}>
-                    <div style={{fontSize:22,fontWeight:800,color:T.teal,fontFamily:T.mono}}>{s.n}</div>
-                    <div style={{fontSize:10,color:T.t3,fontWeight:600,textTransform:"uppercase",letterSpacing:"0.08em"}}>{s.l}</div>
-                  </div>
-                ))}
-              </div>
-              <button onClick={()=>switchView("auth")}
-                style={{border:"none",borderRadius:11,padding:"12px 28px",fontSize:14,fontWeight:700,
-                  background:`linear-gradient(135deg,${T.teal},${T.purple})`,color:"#fff",cursor:"pointer",
-                  boxShadow:`0 6px 20px ${T.tealGlow}`}}>
-                Track Your Own Prices →
+        {/* ══ HERO ══ */}
+        {view === "hero" && (
+          <div style={{textAlign:"center", maxWidth:580, width:"100%", ...fade}}>
+            <h1 style={{
+              fontSize: "clamp(32px,7vw,58px)",
+              fontWeight: 800,
+              color: "#ffffff",
+              letterSpacing: "-0.03em",
+              lineHeight: 1.1,
+              marginBottom: 20,
+            }}>
+              Real Prices.<br/>Smarter Buying.
+            </h1>
+
+            <p style={{
+              fontSize: "clamp(13px,2.5vw,16px)",
+              color: "rgba(180,210,235,0.75)",
+              lineHeight: 1.75,
+              marginBottom: 40,
+              maxWidth: 460,
+              margin: "0 auto 40px",
+            }}>
+              Browse live procurement prices from businesses across the region.
+              Compare suppliers, spot the best deals, and make smarter
+              purchasing decisions — before you spend a kwacha.
+            </p>
+
+            <div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:14}}>
+              {/* Primary CTA */}
+              <button
+                onClick={()=>switchTo("auth")}
+                style={{
+                  border: "none",
+                  borderRadius: 99,
+                  padding: "14px 36px",
+                  fontSize: 15,
+                  fontWeight: 700,
+                  background: `linear-gradient(135deg, ${T.teal}, ${T.tealDim})`,
+                  color: "#fff",
+                  cursor: "pointer",
+                  letterSpacing: "-0.01em",
+                  boxShadow: `0 0 32px ${T.tealGlow}, 0 4px 16px rgba(0,0,0,0.3)`,
+                  transition: "transform 0.15s, box-shadow 0.15s",
+                  minWidth: 220,
+                }}
+                onMouseEnter={e=>{ e.currentTarget.style.transform="scale(1.04)"; e.currentTarget.style.boxShadow=`0 0 44px ${T.tealGlow}, 0 6px 20px rgba(0,0,0,0.4)`; }}
+                onMouseLeave={e=>{ e.currentTarget.style.transform="scale(1)"; e.currentTarget.style.boxShadow=`0 0 32px ${T.tealGlow}, 0 4px 16px rgba(0,0,0,0.3)`; }}
+              >
+                Explore The Market →
               </button>
-            </div>
 
-            {/* Catalog */}
-            <div style={{padding:"0 16px 60px",maxWidth:1100,margin:"0 auto"}}>
-              <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:16,flexWrap:"wrap",gap:10}}>
-                <div>
-                  <h2 style={{fontSize:18,fontWeight:800,color:T.t1}}>Market Catalog</h2>
-                  <p style={{fontSize:12,color:T.t3,marginTop:2}}>Community-sourced · Anonymous · Updated live</p>
-                </div>
-              </div>
-              {loading
-                ? <div style={{textAlign:"center",padding:"60px",color:T.t3}}>
-                    <div className="spin" style={{width:32,height:32,border:`2px solid ${T.border}`,borderTopColor:T.teal,borderRadius:"50%",margin:"0 auto 12px"}}/>
-                    Loading market data…
-                  </div>
-                : <MarketCatalog purchases={marketData} guestMode/>
-              }
-            </div>
-
-            {/* CTA strip */}
-            <div style={{background:T.cardBg,borderTop:`1px solid ${T.border}`,padding:"40px 20px",textAlign:"center"}}>
-              <div style={{maxWidth:480,margin:"0 auto"}}>
-                <div style={{fontSize:28,marginBottom:12}}>📊</div>
-                <h3 style={{fontSize:20,fontWeight:800,color:T.t1,marginBottom:10}}>Want to track your own procurement?</h3>
-                <p style={{fontSize:13,color:T.t2,marginBottom:24,lineHeight:1.6}}>
-                  Sign up free to log purchases, manage suppliers, generate reports, and contribute prices to this catalog.
-                </p>
-                <button onClick={()=>switchView("auth")}
-                  style={{border:"none",borderRadius:12,padding:"13px 32px",fontSize:15,fontWeight:700,
-                    background:`linear-gradient(135deg,${T.teal},${T.purple})`,color:"#fff",cursor:"pointer",
-                    boxShadow:`0 6px 20px ${T.tealGlow}`}}>
-                  Create Free Account →
-                </button>
-              </div>
+              {/* Secondary CTA */}
+              <button
+                onClick={()=>switchTo("auth")}
+                style={{
+                  border: "1.5px solid rgba(255,255,255,0.18)",
+                  borderRadius: 99,
+                  padding: "12px 36px",
+                  fontSize: 14,
+                  fontWeight: 600,
+                  background: "rgba(255,255,255,0.05)",
+                  color: "rgba(220,240,255,0.85)",
+                  cursor: "pointer",
+                  backdropFilter: "blur(8px)",
+                  letterSpacing: "-0.01em",
+                  transition: "all 0.15s",
+                  minWidth: 220,
+                }}
+                onMouseEnter={e=>{ e.currentTarget.style.background="rgba(255,255,255,0.10)"; e.currentTarget.style.borderColor="rgba(255,255,255,0.30)"; }}
+                onMouseLeave={e=>{ e.currentTarget.style.background="rgba(255,255,255,0.05)"; e.currentTarget.style.borderColor="rgba(255,255,255,0.18)"; }}
+              >
+                Sign In →
+              </button>
             </div>
           </div>
         )}
 
-        {/* ══ AUTH VIEW ══ */}
-        {view==="auth" && (
-          <div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"calc(100vh - 60px)",padding:20}}>
-            <div style={{width:"100%",maxWidth:420}}>
-              <button onClick={()=>switchView("catalog")}
-                style={{background:"none",border:"none",color:T.t2,fontSize:13,cursor:"pointer",marginBottom:20,display:"flex",alignItems:"center",gap:6,padding:0}}>
-                ← Back to Market
-              </button>
-              <AuthScreen onBack={()=>switchView("catalog")} embedded/>
-            </div>
+        {/* ══ AUTH ══ */}
+        {view === "auth" && (
+          <div style={{width:"100%", maxWidth:420, ...fade}}>
+            <button
+              onClick={()=>switchTo("hero")}
+              style={{background:"none",border:"none",color:"rgba(180,210,235,0.6)",fontSize:13,
+                cursor:"pointer",marginBottom:24,display:"flex",alignItems:"center",gap:6,padding:0,
+                transition:"color 0.15s"}}
+              onMouseEnter={e=>e.currentTarget.style.color=T.teal}
+              onMouseLeave={e=>e.currentTarget.style.color="rgba(180,210,235,0.6)"}
+            >
+              ← Back
+            </button>
+            <AuthScreen embedded/>
           </div>
         )}
       </div>
