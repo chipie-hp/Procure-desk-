@@ -4463,6 +4463,7 @@ export default function App() {
   const [addVendorOpen,   setAddVendorOpen]   = useState(false);
   const [vendorFilters,   setVendorFilters]   = useState({ search:"", cat:"All", sort:"name", view:"grid" });
   const [marketDataForAlerts, setMarketDataForAlerts] = useState([]);
+  const [sidebarOpen,     setSidebarOpen]     = useState(false);
 
   // Compute price alerts whenever purchases or market data changes
   const priceAlerts = useMemo(()=>calcPriceAlerts(purchases, marketDataForAlerts, 0.10),[purchases, marketDataForAlerts]);
@@ -4547,7 +4548,7 @@ export default function App() {
       try { setVendorFilters(JSON.parse(prData.vendor_filters)); } catch(e) {}
     }
     // Restore last visited page
-    const validPages = ["home","purchases","vendors","insights","reports","catalog","market","settings","admin"];
+    const validPages = ["home","purchases","vendors","team","insights","reports","catalog","market","settings","admin"];
     if (prData?.last_page && validPages.includes(prData.last_page)) {
       setPage(prData.last_page);
     }
@@ -4671,8 +4672,6 @@ export default function App() {
 
   // Waiting for data
   const prof = profile || { name: session.user.email, role:"", email:session.user.email, org:"", phone:"", currency:"MWK", dateFormat:"YYYY-MM-DD", defaultCat:"Foods", companyName:"", footerNote:"", isAdmin:false };
-
-  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const NAV = [
     { id:"home",      icon:"🏠", label:"Home" },
